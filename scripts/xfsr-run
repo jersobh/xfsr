@@ -34,7 +34,8 @@ usage() {
 Usage: xfsr-run [options] [--] <command> [args...]
 
 Options:
-  --preset quality|balanced|performance   FSR scale (default: quality)
+  --preset quality|balanced|performance|ultra   FSR scale (default: quality)
+                                          ultra = 2.5× (weak GPUs / max FPS)
   --fsr 0|1                               native / FSR1 (default: 1; FSR3 demo-only; FSR4 not yet)
   --offload / --no-offload                dual-GPU iGPU present (off by default —
                                           same-GPU FSR is usually faster for games)
@@ -58,6 +59,7 @@ EOF
 
 scale_for_preset() {
   case "$1" in
+    ultra|U|extreme) echo 2.5 ;;
     performance|perf|E) echo 2.0 ;;
     balanced|W) echo 1.7 ;;
     *) echo 1.5 ;;
@@ -175,9 +177,9 @@ run_with_hud() {
 }
 
 case "$PRESET" in
-  quality|balanced|performance|Q|W|E) ;;
+  quality|balanced|performance|ultra|Q|W|E|U|extreme) ;;
   *)
-    echo "xfsr-run: bad --preset '$PRESET'" >&2
+    echo "xfsr-run: bad --preset '$PRESET' (quality|balanced|performance|ultra)" >&2
     exit 2
     ;;
 esac
@@ -196,6 +198,7 @@ RENDER_W=$(( RENDER_W < 64 ? 64 : RENDER_W ))
 RENDER_H=$(( RENDER_H < 64 ? 64 : RENDER_H ))
 if [[ "$OUT_W" == "1920" && "$OUT_H" == "1080" ]]; then
   case "$PRESET" in
+    ultra|U|extreme) RENDER_W=768; RENDER_H=432 ;;
     performance|perf|E) RENDER_W=960; RENDER_H=540 ;;
     balanced|W) RENDER_W=1129; RENDER_H=635 ;;
     *) RENDER_W=1280; RENDER_H=720 ;;

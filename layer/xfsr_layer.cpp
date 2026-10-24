@@ -1,6 +1,6 @@
 // VK_LAYER_XFSR — dual-GPU FSR1 offload (demo mode 2).
 // Enable: ENABLE_XFSR=1
-// Config: XFSR_FSR=1 XFSR_PRESET=quality|balanced|performance
+// Config: XFSR_FSR=1 XFSR_PRESET=quality|balanced|performance|ultra
 //         XFSR_OFFLOAD=1 (default)
 // Legacy CROSSVULKAN_* env names still accepted.
 //
@@ -85,10 +85,21 @@ void logv(const char* fmt, ...) {
 }
 
 float presetScaleFromEnv() {
+    // xfsr-run exports XFSR_SCALE — prefer it when set (covers ultra 2.5× etc.).
+    if (const char* s = std::getenv("XFSR_SCALE")) {
+        char* end = nullptr;
+        const float v = std::strtof(s, &end);
+        if (end != s && v >= 1.01f && v <= 8.0f) return v;
+    }
     const char* p = xfsrEnv("XFSR_PRESET", "CROSSVULKAN_PRESET_MODE");
     if (!p) return 1.5f;
-    if (std::strcmp(p, "balanced") == 0) return 1.7f;
-    if (std::strcmp(p, "performance") == 0 || std::strcmp(p, "perf") == 0) return 2.0f;
+    if (std::strcmp(p, "ultra") == 0 || std::strcmp(p, "U") == 0 ||
+        std::strcmp(p, "extreme") == 0)
+        return 2.5f;
+    if (std::strcmp(p, "balanced") == 0 || std::strcmp(p, "W") == 0) return 1.7f;
+    if (std::strcmp(p, "performance") == 0 || std::strcmp(p, "perf") == 0 ||
+        std::strcmp(p, "E") == 0)
+        return 2.0f;
     return 1.5f;
 }
 
@@ -165,7 +176,10 @@ void computeRenderSize(uint32_t displayW, uint32_t displayH, float scale, uint32
     uint32_t rw = std::max(64u, static_cast<uint32_t>(displayW / scale + 0.5f));
     uint32_t rh = std::max(64u, static_cast<uint32_t>(displayH / scale + 0.5f));
     if (displayW == 1920 && displayH == 1080) {
-        if (scale >= 1.9f) {
+        if (scale >= 2.4f) {
+            rw = 768;
+            rh = 432;
+        } else if (scale >= 1.9f) {
             rw = 960;
             rh = 540;
         } else if (scale >= 1.6f) {
@@ -1650,30 +1664,29 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
         const GpuImage* frameImg = &ps->appImages[idx];
         bool roundtripUpscaled = false;
         if (ps->zinkOffloadRoundtrip && dd->xferReady && dd->xferBackReady && ps->useFsr) {
-            // Sync round-trip: Zink leaves PRESENT_SRC; transfer expects SHADER_READ_ONLY.
-            if (dd->QueueWaitIdle && dd->graphicsQueue) dd->QueueWaitIdle(dd->graphicsQueue);
-            (void)queue;
-            dd->dgpu.resetAndBegin();
-            transitionImage(&dd->dgpu, dd->dgpu.cmd, ps->appImages[idx].image,
-                            VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                            VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                            VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
-            dd->dgpu.endSubmitWait();
-
+            // Async round-trip: pipelined dGPU→iGPU, FSR on ready frame, pipelined iGPU→dGPU.
+            // recordDownload accepts PRESENT_SRC (Zink) / SHADER_READ_ONLY (FSR out).
+            std::vector<VkPipelineStageFlags> stages;
+            if (pPresentInfo->waitSemaphoreCount > 0) {
+                stages.assign(pPresentInfo->waitSemaphoreCount, VK_PIPELINE_STAGE_TRANSFER_BIT);
+            }
             double memcpyMs = 0, totalMs = 0;
-            const GpuImage& onIgpu =
-                dd->xfer.transferSync(ps->appImages[idx], memcpyMs, totalMs);
+            const GpuImage& onIgpu = dd->xfer.transferPipeline(
+                ps->appImages[idx], memcpyMs, totalMs, pPresentInfo->waitSemaphoreCount,
+                pPresentInfo->waitSemaphoreCount > 0 ? pPresentInfo->pWaitSemaphores : nullptr,
+                stages.empty() ? nullptr : stages.data(), VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
 
             dd->igpu.resetAndBegin();
             ps->fsr.record(dd->igpu.cmd, onIgpu);
             dd->igpu.endSubmitWait();
 
-            frameImg = &dd->xferBack.transferSync(ps->fsr.output(), memcpyMs, totalMs);
+            frameImg = &dd->xferBack.transferPipeline(
+                ps->fsr.output(), memcpyMs, totalMs, 0, nullptr, nullptr,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
             roundtripUpscaled = true;
             (void)memcpyMs;
             (void)totalMs;
+            (void)queue;
         } else if (presentsOnIgpu(ps) && dd->xferReady) {
             // Chain app present-wait semaphores into the download submit (no host stall).
             std::vector<VkPipelineStageFlags> stages;
@@ -1846,8 +1859,7 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
         std::vector<VkPipelineStageFlags> waitStages;
         waitSems.reserve(pPresentInfo->waitSemaphoreCount + 1u);
         waitStages.reserve(pPresentInfo->waitSemaphoreCount + 1u);
-        // Classic iGPU-present offload already waited in the transfer submit.
-        // Zink round-trip drained the dGPU via QueueWaitIdle above.
+        // Classic iGPU-present / Zink round-trip already waited in the transfer submit.
         if (!ps->offloadIgpu) {
             for (uint32_t i = 0; i < pPresentInfo->waitSemaphoreCount; ++i) {
                 waitSems.push_back(pPresentInfo->pWaitSemaphores[i]);
@@ -1896,7 +1908,8 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
                              ? ", dual-GPU FSR round-trip"
                              : (ps->offloadIgpu ? ", dual-GPU" : ""));
         }
-        if (ps->presentCount == 60 || (ps->presentCount > 0 && ps->presentCount % 300 == 0)) {
+        if (verboseLog() &&
+            (ps->presentCount == 60 || (ps->presentCount > 0 && ps->presentCount % 300 == 0))) {
             std::fprintf(stderr, "[xfsr] presented %u frames (%ux%u → %ux%u %s)\n", ps->presentCount,
                          ps->renderW, ps->renderH, ps->displayW, ps->displayH,
                          ps->useFsr ? "FSR1" : "blit");

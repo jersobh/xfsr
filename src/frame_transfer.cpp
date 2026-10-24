@@ -367,9 +367,20 @@ const GpuImage& FrameTransfer::transferSync(const GpuImage& srcOptimal, double& 
 const GpuImage& FrameTransfer::transferPipeline(const GpuImage& srcOptimal, double& outMemcpyMs,
                                                 double& outTotalMs, uint32_t waitSemCount,
                                                 const VkSemaphore* waitSems,
-                                                const VkPipelineStageFlags* waitStages) {
+                                                const VkPipelineStageFlags* waitStages,
+                                                VkImageLayout srcLayout) {
     // Memcpy path cannot overlap cleanly across devices — stay fully sync.
+    // transferSync always assumes SHADER_READ_ONLY; transition if needed.
     if (!pipelined || !useSharedHost) {
+        if (srcLayout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+            srcCtx->resetAndBegin();
+            transitionImage(srcCtx, srcCtx->cmd, srcOptimal.image, srcLayout,
+                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                            VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                            VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
+            srcCtx->endSubmitWait();
+        }
         return transferSync(srcOptimal, outMemcpyMs, outTotalMs);
     }
 
@@ -396,7 +407,7 @@ const GpuImage& FrameTransfer::transferPipeline(const GpuImage& srcOptimal, doub
     // Kick download(N) — wait on app semaphores in-queue (no host stall).
     sd.ResetCommandBuffer(s.srcCmd, 0);
     sd.BeginCommandBuffer(s.srcCmd, &bi);
-    recordDownload(s.srcCmd, srcOptimal, fill);
+    recordDownload(s.srcCmd, srcOptimal, fill, srcLayout);
     sd.EndCommandBuffer(s.srcCmd);
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     if (waitSemCount > 0 && waitSems) {
@@ -469,10 +480,11 @@ const GpuImage& FrameTransfer::transferPipeline(const GpuImage& srcOptimal, doub
     return *result;
 }
 
-void FrameTransfer::recordDownload(VkCommandBuffer cmd, const GpuImage& srcOptimal, int slot) {
+void FrameTransfer::recordDownload(VkCommandBuffer cmd, const GpuImage& srcOptimal, int slot,
+                                   VkImageLayout srcLayout) {
     srcCtx->loadDispatch();
     Slot& s = slots[slot % kSlots];
-    transitionImage(srcCtx, cmd, srcOptimal.image, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+    transitionImage(srcCtx, cmd, srcOptimal.image, srcLayout,
                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                     VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_MEMORY_WRITE_BIT,
                     VK_ACCESS_TRANSFER_READ_BIT);
@@ -490,7 +502,7 @@ void FrameTransfer::recordDownload(VkCommandBuffer cmd, const GpuImage& srcOptim
                         VK_ACCESS_HOST_READ_BIT);
     }
     transitionImage(srcCtx, cmd, srcOptimal.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                    VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    srcLayout, VK_PIPELINE_STAGE_TRANSFER_BIT,
                     VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, VK_ACCESS_TRANSFER_READ_BIT, 0);
 }
 

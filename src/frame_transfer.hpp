@@ -60,12 +60,16 @@ struct FrameTransfer {
     // True async 3-slot: overlaps download(N), upload(N−1), consume(N−2).
     // Optional waitSems are waited on the download submit (no host stall) — use for
     // app QueuePresent wait-semaphores on the dGPU.
+    // srcLayout: app swapchain images are PRESENT_SRC; FSR/compute outputs are often
+    // SHADER_READ_ONLY (Zink offload round-trip back-haul).
     const GpuImage& transferPipeline(const GpuImage& srcOptimal, double& outMemcpyMs,
                                      double& outTotalMs, uint32_t waitSemCount = 0,
                                      const VkSemaphore* waitSems = nullptr,
-                                     const VkPipelineStageFlags* waitStages = nullptr);
+                                     const VkPipelineStageFlags* waitStages = nullptr,
+                                     VkImageLayout srcLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
 
-    void recordDownload(VkCommandBuffer cmd, const GpuImage& srcOptimal, int slot);
+    void recordDownload(VkCommandBuffer cmd, const GpuImage& srcOptimal, int slot,
+                        VkImageLayout srcLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
     void recordUpload(VkCommandBuffer cmd, int slot);
     GpuImage& slotDstOptimal(int slot) { return slots[slot].dstOptimal; }
     VkFence slotSrcFence(int slot) { return slots[slot].srcFence; }
