@@ -1,0 +1,46 @@
+{
+	"sources" : 
+	[
+		{
+			"file" : "/home/jeff/Projects/crossvulkan/build-pkg/_deps/volk-subbuild/CMakeFiles/volk-populate"
+		},
+		{
+			"file" : "/home/jeff/Projects/crossvulkan/build-pkg/_deps/volk-subbuild/CMakeFiles/volk-populate.rule"
+		},
+		{
+			"file" : "/home/jeff/Projects/crossvulkan/build-pkg/_deps/volk-subbuild/CMakeFiles/volk-populate-complete.rule"
+		},
+		{
+			"file" : "/home/jeff/Projects/crossvulkan/build-pkg/_deps/volk-subbuild/volk-populate-prefix/src/volk-populate-stamp/volk-populate-build.rule"
+		},
+		{
+			"file" : "/home/jeff/Projects/crossvulkan/build-pkg/_deps/volk-subbuild/volk-populate-prefix/src/volk-populate-stamp/volk-populate-configure.rule"
+		},
+		{
+			"file" : "/home/jeff/Projects/crossvulkan/build-pkg/_deps/volk-subbuild/volk-populate-prefix/src/volk-populate-stamp/volk-populate-download.rule"
+		},
+		{
+			"file" : "/home/jeff/Projects/crossvulkan/build-pkg/_deps/volk-subbuild/volk-populate-prefix/src/volk-populate-stamp/volk-populate-install.rule"
+		},
+		{
+			"file" : "/home/jeff/Projects/crossvulkan/build-pkg/_deps/volk-subbuild/volk-populate-prefix/src/volk-populate-stamp/volk-populate-mkdir.rule"
+		},
+		{
+			"file" : "/home/jeff/Projects/crossvulkan/build-pkg/_deps/volk-subbuild/volk-populate-prefix/src/volk-populate-stamp/volk-populate-patch.rule"
+		},
+		{
+			"file" : "/home/jeff/Projects/crossvulkan/build-pkg/_deps/volk-subbuild/volk-populate-prefix/src/volk-populate-stamp/volk-populate-test.rule"
+		},
+		{
+			"file" : "/home/jeff/Projects/crossvulkan/build-pkg/_deps/volk-subbuild/volk-populate-prefix/src/volk-populate-stamp/volk-populate-update.rule"
+		}
+	],
+	"target" : 
+	{
+		"labels" : 
+		[
+			"volk-populate"
+		],
+		"name" : "volk-populate"
+	}
+}

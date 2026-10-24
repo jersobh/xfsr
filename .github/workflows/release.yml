@@ -1,0 +1,75 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to create/publish (e.g. v0.1.0). Leave empty to package only."
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    name: Build Linux package
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkg-config \
+            glslang-tools libvulkan-dev python3
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            TAG="${{ github.ref_name }}"
+          elif [[ -n "${{ inputs.tag }}" ]]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="v$(tr -d '[:space:]' < VERSION)"
+          fi
+          VER="${TAG#v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "Packaging $TAG ($VER)"
+          # Keep VERSION file in sync with the tag for the archive name
+          printf '%s\n' "$VER" > VERSION
+
+      - name: Package xfsr-run
+        run: |
+          chmod +x scripts/package-xfsr.sh scripts/xfsr-run
+          ./scripts/package-xfsr.sh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: xfsr-${{ steps.ver.outputs.version }}-linux-x86_64
+          path: |
+            dist/xfsr-${{ steps.ver.outputs.version }}-linux-x86_64.tar.gz
+            dist/xfsr-linux-x86_64.tar.gz
+
+      - name: Create GitHub Release
+        if: github.ref_type == 'tag' || inputs.tag != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: xfsr-run ${{ steps.ver.outputs.version }}
+          body_path: CHANGELOG.md
+          files: |
+            dist/xfsr-${{ steps.ver.outputs.version }}-linux-x86_64.tar.gz
+            dist/xfsr-linux-x86_64.tar.gz
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

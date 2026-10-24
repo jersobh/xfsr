@@ -1,0 +1,13 @@
+# Hashes of file build rules.
+dedc1d8098fcc5281249e26e8d313eb4 CMakeFiles/install-xfsr-layer
+03f563175485f17d6be081c0626d1a22 CMakeFiles/package-xfsr
+6fc8f290f937c928bb53a9f9998be234 CMakeFiles/shaders
+b8ebdb7db423411d8f85d5c7e853934e shaders/blit.frag.spv
+8159ef3c4b7420d54ff7cb5b5817b46d shaders/blit.vert.spv
+0ad99df24b031b188456b81c8003a79a shaders/fsr_easu.comp.spv
+ac360eda39499852d18c3eb8a4def3a0 shaders/fsr_easu_fp16.comp.spv
+0a5c3de9beb3edd7afc1f2b03628ffb8 shaders/fsr_easu_fp32.comp.spv
+c2ae2237138e42a4c0e216a59711808b shaders/fsr_rcas_fp16.comp.spv
+9b52e5ad53e9d8f875a2aa3bf7793553 shaders/fsr_rcas_fp32.comp.spv
+772654917886e772d1b9ed7fb041844b shaders/scene.frag.spv
+a1aee09027c0c89840697ddf83522253 shaders/scene.vert.spv

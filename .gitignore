@@ -1,0 +1,10 @@
+/build/
+/build-release/
+/cmake-build-*/
+/dist/
+compile_commands.json
+bench.csv
+*.spv
+.cache/
+*.log
+*.log2

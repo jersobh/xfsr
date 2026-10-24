@@ -1,0 +1,17 @@
+{
+  "file_format_version": "1.2.0",
+  "layer": {
+    "name": "VK_LAYER_XFSR",
+    "type": "GLOBAL",
+    "library_path": "/home/jeff/Projects/crossvulkan/build-pkg/libVkLayer_XFSR.so",
+    "api_version": "1.4.0",
+    "implementation_version": "1",
+    "description": "xfsr dual-GPU FSR1 offload (dGPU render → shared host → iGPU FSR → present)",
+    "enable_environment": {
+      "ENABLE_XFSR": "1"
+    },
+    "disable_environment": {
+      "DISABLE_XFSR": "1"
+    }
+  }
+}

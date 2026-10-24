@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/jeff/Projects/crossvulkan/build-pkg/_deps/vulkan_headers-subbuild/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

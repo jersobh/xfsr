@@ -1,0 +1,345 @@
+#!/usr/bin/env bash
+# xfsr-run — dual-GPU FSR via Vulkan layer (gamemoderun-style).
+#
+# Steam:  xfsr-run --mangohud --preset performance %command%
+#
+# Layer: dGPU low-res → shared-host DMA → iGPU FSR1 → present (demo mode 2).
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")")/.." && pwd)"
+BUILD="${XFSR_BUILD:-$ROOT/build}"
+LAYER_DIR=""
+PRINT_ONLY=0
+USE_ZINK=1
+USE_NESTED=0
+USE_MANGOHUD=0
+PREFER_DGPU=1
+OUT_W="${XFSR_OUTPUT_W:-1920}"
+OUT_H="${XFSR_OUTPUT_H:-1080}"
+PRESET="${XFSR_PRESET:-${CROSSVULKAN_PRESET_MODE:-quality}}"
+FSR="${XFSR_FSR:-${CROSSVULKAN_FSR:-1}}"
+# Default same-GPU FSR. Do NOT inherit ambient XFSR_OFFLOAD — Steam/sessions
+# often keep a stale =1 from testing, which enables dual-GPU DMA and can crash CS2.
+OFFLOAD=0
+OFFLOAD_CLI=0
+RCAS="${XFSR_RCAS:-${CROSSVULKAN_RCAS:-1}}"
+
+if [[ "${XFSR_MANGOHUD:-0}" == "1" ]]; then
+  USE_MANGOHUD=1
+fi
+
+usage() {
+  cat <<'EOF'
+Usage: xfsr-run [options] [--] <command> [args...]
+
+Options:
+  --preset quality|balanced|performance   FSR scale (default: quality)
+  --fsr 0|1                               native / FSR1 (default: 1; FSR3 demo-only; FSR4 not yet)
+  --offload / --no-offload                dual-GPU iGPU present (off by default —
+                                          same-GPU FSR is usually faster for games)
+  --rcas / --no-rcas                      FSR1 sharpening pass (default: on; --no-rcas = EASU only)
+  --zink / --no-zink                      Zink for OpenGL (default: on — leave on
+                                          unless you know the title is Vulkan-only)
+  --mangohud / --hud                      Wrap with MangoHud for FPS/frametime
+  --igpu                                  Prefer iGPU ICD (default: prefer dGPU)
+  --layer-dir DIR                         directory with VkLayer_XFSR.json
+  --print                                 print env / command, then exit
+  -h, --help
+
+  --nested / --gamescope                  Deprecated (second compositor; not dual-GPU FSR)
+
+Env: XFSR_*, XFSR_VERBOSE=1, XFSR_MANGOHUD=1
+
+Steam:  xfsr-run --mangohud --preset performance %command%
+Smoke:  ./scripts/xfsr-demo.sh
+EOF
+}
+
+scale_for_preset() {
+  case "$1" in
+    performance|perf|E) echo 2.0 ;;
+    balanced|W) echo 1.7 ;;
+    *) echo 1.5 ;;
+  esac
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --print) PRINT_ONLY=1; shift ;;
+    --zink) USE_ZINK=1; shift ;;
+    --no-zink) USE_ZINK=0; shift ;;
+    --nested|--gamescope) USE_NESTED=1; shift ;;
+    --mangohud|--hud) USE_MANGOHUD=1; shift ;;
+    --no-mangohud|--no-hud) USE_MANGOHUD=0; shift ;;
+    --igpu) PREFER_DGPU=0; shift ;;
+    --output)
+      OUT_W="${2%%x*}"; OUT_H="${2##*x}"; shift 2 ;;
+    --output=*)
+      o="${1#*=}"; OUT_W="${o%%x*}"; OUT_H="${o##*x}"; shift ;;
+    --preset)
+      PRESET="${2:?}"; shift 2 ;;
+    --preset=*) PRESET="${1#*=}"; shift ;;
+    --fsr)
+      FSR="${2:?}"; shift 2 ;;
+    --fsr=*) FSR="${1#*=}"; shift ;;
+    --offload) OFFLOAD=1; OFFLOAD_CLI=1; shift ;;
+    --no-offload) OFFLOAD=0; OFFLOAD_CLI=1; shift ;;
+    --rcas) RCAS=1; shift ;;
+    --no-rcas) RCAS=0; shift ;;
+    --layer-dir)
+      LAYER_DIR="${2:?}"; shift 2 ;;
+    --layer-dir=*) LAYER_DIR="${1#*=}"; shift ;;
+    --) shift; break ;;
+    -*)
+      echo "xfsr-run: unknown option: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+    *) break ;;
+  esac
+done
+
+case "$FSR" in
+  0|1|3) ;;
+  4)
+    echo "xfsr-run: FSR 4 is not available on Vulkan yet (AMD FSR SDK 2.x is DX12-only;" >&2
+    echo "  Vulkan support is planned for SDK 2.4). Use --fsr 1 (layer) or demo --fsr 3." >&2
+    exit 2
+    ;;
+  *)
+    echo "xfsr-run: invalid --fsr '$FSR' (use 0, 1, or 3; 4 not available on Vulkan)" >&2
+    exit 2
+    ;;
+esac
+
+if [[ $# -eq 0 && $PRINT_ONLY -eq 0 ]]; then
+  usage >&2
+  exit 1
+fi
+
+find_layer_dir() {
+  # Prefer the build tree when developing so a stale ~/.local install cannot win.
+  local candidates=(
+    "${LAYER_DIR}"
+    "${XFSR_LAYER_PATH:-}"
+    "${BUILD}"
+    "${HOME}/.local/share/vulkan/implicit_layer.d"
+    "/usr/share/vulkan/implicit_layer.d"
+  )
+  local d
+  for d in "${candidates[@]}"; do
+    [[ -n "$d" ]] || continue
+    if [[ -f "$d/VkLayer_XFSR.json" ]]; then
+      echo "$d"
+      return 0
+    fi
+  done
+  return 1
+}
+
+ensure_built() {
+  if [[ -f "$BUILD/libVkLayer_XFSR.so" && -f "$BUILD/VkLayer_XFSR.json" &&
+        -f "$BUILD/libxfsr_gl_shim.so" ]]; then
+    return 0
+  fi
+  if [[ -f "$ROOT/CMakeLists.txt" ]]; then
+    echo "xfsr-run: building layer + GL shim in $BUILD ..." >&2
+    cmake -S "$ROOT" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release \
+      -DXFSR_BUILD_DEMO=OFF -DXFSR_BUILD_BENCH=OFF
+    cmake --build "$BUILD" -j --target VkLayer_XFSR xfsr_gl_shim
+  fi
+}
+
+require_mangohud() {
+  if [[ $USE_MANGOHUD -eq 0 ]]; then
+    return 0
+  fi
+  if ! command -v mangohud >/dev/null 2>&1; then
+    echo "xfsr-run: mangohud not found (install mangohud, or drop --mangohud)" >&2
+    exit 1
+  fi
+}
+
+run_with_hud() {
+  if [[ $USE_MANGOHUD -eq 1 ]]; then
+    # Use MangoHud's implicit Vulkan layer only — do NOT exec the `mangohud`
+    # LD_PRELOAD wrapper. That wrapper can bind vkQueuePresentKHR to the ICD and
+    # skip our FSR present path (glmark2 then shows a postage-stamp corner).
+    export MANGOHUD=1
+    exec "$@"
+  else
+    exec "$@"
+  fi
+}
+
+case "$PRESET" in
+  quality|balanced|performance|Q|W|E) ;;
+  *)
+    echo "xfsr-run: bad --preset '$PRESET'" >&2
+    exit 2
+    ;;
+esac
+case "$FSR" in
+  0|1|3) ;;
+  *)
+    echo "xfsr-run: bad --fsr '$FSR'" >&2
+    exit 2
+    ;;
+esac
+
+SCALE="$(scale_for_preset "$PRESET")"
+RENDER_W="$(awk -v w="$OUT_W" -v s="$SCALE" 'BEGIN{printf "%d", w/s+0.5}')"
+RENDER_H="$(awk -v h="$OUT_H" -v s="$SCALE" 'BEGIN{printf "%d", h/s+0.5}')"
+RENDER_W=$(( RENDER_W < 64 ? 64 : RENDER_W ))
+RENDER_H=$(( RENDER_H < 64 ? 64 : RENDER_H ))
+if [[ "$OUT_W" == "1920" && "$OUT_H" == "1080" ]]; then
+  case "$PRESET" in
+    performance|perf|E) RENDER_W=960; RENDER_H=540 ;;
+    balanced|W) RENDER_W=1129; RENDER_H=635 ;;
+    *) RENDER_W=1280; RENDER_H=720 ;;
+  esac
+fi
+
+require_mangohud
+
+if [[ $USE_NESTED -eq 1 ]]; then
+  echo "xfsr-run: --nested is deprecated (gamescope is not dual-GPU FSR). Using Vulkan layer." >&2
+fi
+
+ensure_built
+LAYER_DIR="$(find_layer_dir)" || {
+  echo "xfsr-run: layer JSON not found. Try: ./scripts/install-xfsr-run.sh" >&2
+  exit 1
+}
+
+# SPIR-V for the layer (installed under share/xfsr/shaders, or build/shaders).
+if [[ -z "${XFSR_SHADER_DIR:-}" ]]; then
+  for d in \
+    "${ROOT}/share/xfsr/shaders" \
+    "${HOME}/.local/share/xfsr/shaders" \
+    "${BUILD}/shaders" \
+    "${ROOT}/build/shaders"; do
+    if [[ -f "$d/fsr_easu_fp32.comp.spv" ]]; then
+      export XFSR_SHADER_DIR="$d"
+      break
+    fi
+  done
+fi
+
+export VK_ADD_IMPLICIT_LAYER_PATH="${LAYER_DIR}${VK_ADD_IMPLICIT_LAYER_PATH:+:$VK_ADD_IMPLICIT_LAYER_PATH}"
+export ENABLE_XFSR=1
+unset DISABLE_XFSR 2>/dev/null || true
+export XFSR_FSR="$FSR"
+export XFSR_PRESET="$PRESET"
+export XFSR_OFFLOAD="$OFFLOAD"
+export XFSR_RCAS="$RCAS"
+# Wayland: ICD currentExtent is often UINT_MAX — seed the layer so caps-shrink works
+# on the first CreateSwapchain (otherwise identity @ full res, flat bench FPS).
+export XFSR_OUTPUT_W="$OUT_W"
+export XFSR_OUTPUT_H="$OUT_H"
+export XFSR_DISPLAY_W="$OUT_W"
+export XFSR_DISPLAY_H="$OUT_H"
+export XFSR_RENDER_W="$RENDER_W"
+export XFSR_RENDER_H="$RENDER_H"
+export XFSR_SCALE="$SCALE"
+export XFSR_DISPLAY_EXTENT="${OUT_W}x${OUT_H}"
+# Layer FSR1 pass follows XFSR_FSR unless explicitly overridden.
+if [[ -z "${XFSR_LAYER_FSR:-}" ]]; then
+  export XFSR_LAYER_FSR="$FSR"
+fi
+
+if [[ $USE_ZINK -eq 1 ]]; then
+  export MESA_LOADER_DRIVER_OVERRIDE=zink
+  export GALLIUM_DRIVER=zink
+  # Wayland ignores shrunk currentExtent (swapchain = window). Prefer X11 for FSR.
+  if [[ -n "${WAYLAND_DISPLAY:-}" && "${XFSR_ZINK_WAYLAND:-0}" != "1" ]]; then
+    unset WAYLAND_DISPLAY WAYLAND_SOCKET
+    echo "xfsr-run: Zink FSR prefers X11 — unset WAYLAND_DISPLAY (XFSR_ZINK_WAYLAND=1 to keep Wayland)." >&2
+  fi
+  # Remap glViewport/glScissor from window size → render size (fixes lower-left corner).
+  SHIM=""
+  for d in "$BUILD" "$ROOT/lib" "${HOME}/.local/lib" "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/../lib"; do
+    if [[ -f "$d/libxfsr_gl_shim.so" ]]; then
+      SHIM="$d/libxfsr_gl_shim.so"
+      break
+    fi
+  done
+  if [[ -n "$SHIM" ]]; then
+    export LD_PRELOAD="${SHIM}${LD_PRELOAD:+:$LD_PRELOAD}"
+    echo "xfsr-run: Zink + FSR (shim $SHIM, render ${RENDER_W}x${RENDER_H})." >&2
+  else
+    echo "xfsr-run: warning: libxfsr_gl_shim.so not found — OpenGL may show a corner crop. Build/install xfsr." >&2
+  fi
+else
+  echo "xfsr-run: --no-zink — native OpenGL bypasses the Vulkan layer (no FSR)." >&2
+fi
+
+# Dual-GPU: keep both ICDs visible (do not set VK_ICD_FILENAMES to one GPU).
+# Prefer discrete via Mesa device-select. Do NOT set DRI_PRIME=1 with Zink —
+# on this hybrid (NVIDIA+AMD) DRI_PRIME=1 forces the Vega iGPU and overrides
+# MESA_VK_DEVICE_SELECT, so the layer never sees a discrete device.
+if [[ $PREFER_DGPU -eq 1 ]]; then
+  if [[ $USE_ZINK -eq 0 ]]; then
+    # Native GL only: PRIME offload hint (unused when --zink).
+    export DRI_PRIME="${DRI_PRIME:-1}"
+  fi
+  if [[ -z "${MESA_VK_DEVICE_SELECT:-}" ]] && command -v vulkaninfo >/dev/null 2>&1; then
+    # Probe without our layer so the device-select list stays parseable.
+    # Example line: GPU 0: 10de:1f91 "NVIDIA …" discrete GPU 0000:01:00.0
+    dgpu_id="$(
+      env -u ENABLE_XFSR -u VK_ADD_IMPLICIT_LAYER_PATH -u VK_LAYER_PATH \
+        MESA_VK_DEVICE_SELECT=list vulkaninfo --summary 2>&1 \
+        | awk '/discrete GPU/{ if (match($0, /[0-9a-fA-F]+:[0-9a-fA-F]+/)) {
+            print substr($0, RSTART, RLENGTH); exit } }' || true
+    )"
+    if [[ -n "$dgpu_id" ]]; then
+      # Prefer discrete for the app, but do NOT set FORCE_DEFAULT_DEVICE —
+      # that filters EnumeratePhysicalDevices to a single GPU and blocks the
+      # iGPU companion. MESA_VK_DEVICE_SELECT alone still prefers the dGPU
+      # while leaving both physical devices visible to the layer.
+      export MESA_VK_DEVICE_SELECT="$dgpu_id"
+      unset MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE 2>/dev/null || true
+    fi
+  fi
+fi
+
+# An empty VK_ICD_FILENAMES / VK_DRIVER_FILES means "no drivers" to the loader.
+# Unset so hybrid NVIDIA+AMD ICDs are discovered normally.
+if [[ -z "${VK_ICD_FILENAMES:-}" ]]; then
+  unset VK_ICD_FILENAMES 2>/dev/null || true
+fi
+if [[ -z "${VK_DRIVER_FILES:-}" ]]; then
+  unset VK_DRIVER_FILES 2>/dev/null || true
+fi
+
+if [[ $PRINT_ONLY -eq 1 ]]; then
+  cat <<EOF
+VK_ADD_IMPLICIT_LAYER_PATH=$VK_ADD_IMPLICIT_LAYER_PATH
+ENABLE_XFSR=$ENABLE_XFSR
+XFSR_SHADER_DIR=${XFSR_SHADER_DIR:-}
+XFSR_FSR=$XFSR_FSR
+XFSR_LAYER_FSR=${XFSR_LAYER_FSR:-}
+XFSR_PRESET=$XFSR_PRESET
+XFSR_OFFLOAD=$XFSR_OFFLOAD
+XFSR_RCAS=$XFSR_RCAS
+XFSR_DISPLAY_EXTENT=${XFSR_DISPLAY_EXTENT:-}
+XFSR_OUTPUT_W=${XFSR_OUTPUT_W:-}
+XFSR_OUTPUT_H=${XFSR_OUTPUT_H:-}
+XFSR_DISPLAY_W=${XFSR_DISPLAY_W:-}
+XFSR_DISPLAY_H=${XFSR_DISPLAY_H:-}
+XFSR_RENDER_W=${XFSR_RENDER_W:-}
+XFSR_RENDER_H=${XFSR_RENDER_H:-}
+LD_PRELOAD=${LD_PRELOAD:-}
+MESA_LOADER_DRIVER_OVERRIDE=${MESA_LOADER_DRIVER_OVERRIDE:-}
+MESA_VK_DEVICE_SELECT=${MESA_VK_DEVICE_SELECT:-}
+DRI_PRIME=${DRI_PRIME:-}
+VK_ICD_FILENAMES=${VK_ICD_FILENAMES:-}
+MANGOHUD=${USE_MANGOHUD}
+layer_dir=$LAYER_DIR
+EOF
+  exit 0
+fi
+
+run_with_hud "$@"
