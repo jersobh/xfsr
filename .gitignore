@@ -1,4 +1,5 @@
 /build/
+/build-pkg/
 /build-release/
 /cmake-build-*/
 /dist/
