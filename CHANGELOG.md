@@ -5,6 +5,14 @@ All notable changes to **xfsr** / **xfsr-run** are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [0.3.1] — 2026-10-24
+
+### Fixed
+
+- `glmark2-wayland` postage-stamp: don’t caps-shrink from `DISPLAY_EXTENT` alone;
+  skip GL viewport remap when the EGL drawable is still window-sized (Wayland Zink
+  identity path). X11 `glmark2` keeps FSR via caps-shrink.
+
 ## [0.3.0] — 2026-10-24
 
 ### Fixed
@@ -106,6 +114,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - Dual-GPU `SURFACE_LOST` / early `OUT_OF_DATE` (opaque app handle + iGPU-only window WSI)
 - Caps-shrink vs Zink EGL drawable mismatch
 
+[0.3.1]: https://github.com/jersobh/xfsr/releases/tag/v0.3.1
 [0.3.0]: https://github.com/jersobh/xfsr/releases/tag/v0.3.0
 [0.2.4]: https://github.com/jersobh/xfsr/releases/tag/v0.2.4
 [0.2.3]: https://github.com/jersobh/xfsr/releases/tag/v0.2.3

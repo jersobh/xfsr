@@ -36,6 +36,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 extern "C" {
@@ -273,6 +274,9 @@ struct InstanceData {
     bool volkReady = false;
     // Dedupe caps-shrink logs (Zink queries every frame).
     uint32_t lastLogCw = 0, lastLogCh = 0, lastLogRw = 0, lastLogRh = 0;
+    // Wayland often has UINT_MAX caps until after the first swapchain; seed window
+    // size from that create and force one OUT_OF_DATE so Zink recreates shrunk.
+    bool zinkWaylandShrinkKick = false;
 };
 
 struct DeviceData {
@@ -391,6 +395,8 @@ std::mutex g_proxyLife;
 std::unordered_map<void*, InstanceData*> g_instances;
 std::unordered_map<void*, DeviceData*> g_devices;
 std::unordered_map<void*, ProxySwapchain*> g_proxies;
+// Passthrough swapchains that should return OUT_OF_DATE once (zink Wayland kick).
+std::unordered_set<void*> g_forceOutOfDateOnce;
 // Companion VkDevices are created via loader callback (not in g_devices). volkLoadDevice
 // still goes through our GDPA — forward to the ICD/loader GDPA saved at create time.
 std::unordered_map<void*, PFN_vkGetDeviceProcAddr> g_companionGdpa;
@@ -1121,12 +1127,15 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_GetPhysicalDeviceSurfaceCapabilitiesKHR(
     }
 
     // Shrink currentExtent to render size; maxImageExtent stays at the window so
-    // present WSI can still be full-size. Wayland UINT_MAX: use remembered real size.
+    // present WSI can still be full-size. Wayland UINT_MAX: only reuse a size that
+    // came from a concrete compositor query — never DISPLAY_EXTENT alone (that made
+    // glmark2-wayland shrink "1080p" while the window stayed 800x600 → identity
+    // swapchain + shim postage-stamp).
     uint32_t winW = 0, winH = 0;
     if (cw != 0xFFFFFFFFu && ch != 0xFFFFFFFFu && cw > 0 && ch > 0) {
         winW = cw;
         winH = ch;
-    } else if (id->realW > 0 && id->realH > 0) {
+    } else if (id->realFromSurface && id->realW > 0 && id->realH > 0) {
         winW = id->realW;
         winH = id->realH;
     }
@@ -1609,16 +1618,33 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSwapchainKHR(VkDevice device,
         if (dd->inst && appW > 0 && appH > 0) {
             dd->inst->realW = appW;
             dd->inst->realH = appH;
-            dd->inst->realFromSurface = haveSurf;
+            // Treat app swapchain extent as the window when compositor extent was
+            // unknown (typical Wayland UINT_MAX before first configure).
+            dd->inst->realFromSurface = true;
         }
     }
 
     // Identity: render == display — completely bypass the proxy (zero xfsr overhead).
     if (ps->renderW == ps->displayW && ps->renderH == ps->displayH) {
-        logv("[xfsr] identity present (render==display %ux%u) — bypass proxy\n", ps->renderW,
-             ps->renderH);
+        // Zink+Wayland: first create often happens before caps-shrink knows the
+        // window. Seed size, kick one OUT_OF_DATE so the next create is shrunk.
+        const bool kickZink = zinkActive() && dd->inst && dd->inst->scale >= 1.01f &&
+                              !dd->inst->zinkWaylandShrinkKick;
+        if (kickZink) {
+            dd->inst->realW = appW;
+            dd->inst->realH = appH;
+            dd->inst->realFromSurface = true;
+            dd->inst->zinkWaylandShrinkKick = true;
+        }
+        logv("[xfsr] identity present (render==display %ux%u) — bypass proxy%s\n", ps->renderW,
+             ps->renderH, kickZink ? " (zink shrink kick)" : "");
         delete ps;
-        return createSwapchainPassthrough(dd, pCreateInfo, pAllocator, pSwapchain);
+        VkResult pr = createSwapchainPassthrough(dd, pCreateInfo, pAllocator, pSwapchain);
+        if (pr == VK_SUCCESS && kickZink && pSwapchain && *pSwapchain) {
+            std::lock_guard<std::mutex> lock(g_mu);
+            g_forceOutOfDateOnce.insert(keyOf(*pSwapchain));
+        }
+        return pr;
     }
 
     const VkSwapchainKHR oldApp = pCreateInfo->oldSwapchain;
@@ -1784,6 +1810,15 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_AcquireNextImageKHR(VkDevice device, VkSwapc
         return VK_SUCCESS;
     }
     if (!dd) return VK_ERROR_INITIALIZATION_FAILED;
+    {
+        std::lock_guard<std::mutex> lock(g_mu);
+        auto it = g_forceOutOfDateOnce.find(keyOf(swapchain));
+        if (it != g_forceOutOfDateOnce.end()) {
+            g_forceOutOfDateOnce.erase(it);
+            logv("[xfsr] zink shrink kick: OUT_OF_DATE on acquire (recreate at render size)\n");
+            return VK_ERROR_OUT_OF_DATE_KHR;
+        }
+    }
     return dd->AcquireNextImageKHR(device, swapchain, /*timeout*/ UINT64_MAX, semaphore, fence,
                                    pImageIndex);
 }
@@ -1955,6 +1990,17 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
 
     if (!ps || !ps->pipelineReady || !dd) {
         life.unlock();
+        // One-shot OUT_OF_DATE after Wayland identity create so Zink recreates
+        // with caps-shrunk extent (see CreateSwapchain zink shrink kick).
+        {
+            std::lock_guard<std::mutex> lock(g_mu);
+            auto it = g_forceOutOfDateOnce.find(keyOf(pPresentInfo->pSwapchains[0]));
+            if (it != g_forceOutOfDateOnce.end()) {
+                g_forceOutOfDateOnce.erase(it);
+                logv("[xfsr] zink shrink kick: OUT_OF_DATE to recreate at render size\n");
+                return VK_ERROR_OUT_OF_DATE_KHR;
+            }
+        }
         if (dd && dd->QueuePresentKHR) return dd->QueuePresentKHR(queue, pPresentInfo);
         std::lock_guard<std::mutex> lock(g_mu);
         if (!g_devices.empty())

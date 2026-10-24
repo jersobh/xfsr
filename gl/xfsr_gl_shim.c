@@ -52,6 +52,8 @@ XFSR_EXPORT void* glXGetProcAddressARB(const char* name);
 XFSR_EXPORT void* eglGetProcAddress(const char* name);
 XFSR_EXPORT void* glfwGetProcAddress(const char* name);
 XFSR_EXPORT void* dlsym(void* handle, const char* symbol);
+static void* resolve_next(const char* name, void* self);
+static int query_egl_drawable(int* out_w, int* out_h);
 
 static void load_extents(void) {
     if (g_ready) return;
@@ -97,6 +99,36 @@ static void target_render_size(int win_w, int win_h, int* out_rw, int* out_rh) {
     }
 }
 
+/* EGL drawable size = Zink color image. If it still equals the window, the layer
+ * took the identity path (no caps-shrink) — remapping would postage-stamp.
+ * Only remap when the drawable is already at render size. */
+static int query_egl_drawable(int* out_w, int* out_h) {
+    typedef void* (*EglGetCurrentDisplayFn)(void);
+    typedef void* (*EglGetCurrentSurfaceFn)(unsigned int);
+    typedef unsigned int (*EglQuerySurfaceFn)(void*, void*, int, int*);
+    enum { EGL_DRAW = 0x3059, EGL_WIDTH = 0x3057, EGL_HEIGHT = 0x3056 };
+    static EglGetCurrentDisplayFn get_dpy;
+    static EglGetCurrentSurfaceFn get_surf;
+    static EglQuerySurfaceFn query;
+    static int resolved;
+    if (!resolved) {
+        resolved = 1;
+        get_dpy = (EglGetCurrentDisplayFn)resolve_next("eglGetCurrentDisplay", NULL);
+        get_surf = (EglGetCurrentSurfaceFn)resolve_next("eglGetCurrentSurface", NULL);
+        query = (EglQuerySurfaceFn)resolve_next("eglQuerySurface", NULL);
+    }
+    if (!get_dpy || !get_surf || !query) return 0;
+    void* dpy = get_dpy();
+    void* surf = get_surf(EGL_DRAW);
+    if (!dpy || !surf) return 0;
+    int w = 0, h = 0;
+    if (!query(dpy, surf, EGL_WIDTH, &w) || !query(dpy, surf, EGL_HEIGHT, &h)) return 0;
+    if (w < 64 || h < 64) return 0;
+    *out_w = w;
+    *out_h = h;
+    return 1;
+}
+
 static void remap_rect(GLint* x, GLint* y, GLsizei* w, GLsizei* h) {
     load_extents();
     if (!w || !h) return;
@@ -124,6 +156,17 @@ static void remap_rect(GLint* x, GLint* y, GLsizei* w, GLsizei* h) {
         (g_dw > 0 && g_dh > 0 && abs((int)*w - g_dw) <= near && abs((int)*h - g_dh) <= near);
     if (!is_window && !is_display) return;
 
+    /* Wayland identity path: drawable still window-sized → do not shrink viewport. */
+    int dw = 0, dh = 0;
+    if (query_egl_drawable(&dw, &dh)) {
+        if (abs(dw - win_w) <= near && abs(dh - win_h) <= near) return; /* identity */
+        /* Caps-honored: drawable ≈ render size — remap window viewport into it. */
+        if (abs(dw - tw) > 16 || abs(dh - th) > 16) {
+            tw = dw;
+            th = dh;
+        }
+    }
+
     if (x) *x = 0;
     if (y) *y = 0;
     *w = tw;
@@ -131,8 +174,8 @@ static void remap_rect(GLint* x, GLint* y, GLsizei* w, GLsizei* h) {
 
     if (!g_logged && (*w != ow || *h != oh) && getenv("XFSR_VERBOSE")) {
         g_logged = 1;
-        fprintf(stderr, "[xfsr-gl] remap %dx%d → %dx%d (glfw_fb=%dx%d win=%dx%d)\n", (int)ow,
-                (int)oh, (int)*w, (int)*h, g_fb_w, g_fb_h, win_w, win_h);
+        fprintf(stderr, "[xfsr-gl] remap %dx%d → %dx%d (glfw_fb=%dx%d win=%dx%d egl=%dx%d)\n",
+                (int)ow, (int)oh, (int)*w, (int)*h, g_fb_w, g_fb_h, win_w, win_h, dw, dh);
     }
 }
 
@@ -294,11 +337,14 @@ XFSR_EXPORT void glfwGetFramebufferSize(void* window, int* width, int* height) {
     g_fb_w = *width;
     g_fb_h = *height;
     load_extents();
-    /* Lie render size so the app's glViewport matches Zink's caps-shrunk image.
-     * Uses window/scale for windowed glmark2 — not the 1080p XFSR_RENDER_* hint. */
+    /* Lie render size only when Zink's drawable is already caps-shrunk. On
+     * Wayland identity (drawable == window) lying would desync projection. */
+    int dw = 0, dh = 0;
+    if (!query_egl_drawable(&dw, &dh)) return;
     int tw = 0, th = 0;
-    target_render_size(*width, *height, &tw, &th);
-    if (tw > 0 && th > 0 && (tw != *width || th != *height)) {
+    target_render_size(g_fb_w, g_fb_h, &tw, &th);
+    if (tw <= 0 || th <= 0) return;
+    if (abs(dw - tw) <= 2 && abs(dh - th) <= 2 && (tw != *width || th != *height)) {
         *width = tw;
         *height = th;
     }
