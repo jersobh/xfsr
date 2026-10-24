@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <unistd.h>
 
 namespace {
 
@@ -71,6 +72,139 @@ void createImportedHostBuffer(DeviceContext* ctx, void* hostPtr, VkDeviceSize si
     vkCheck(d.BindBufferMemory(ctx->device, *outBuf, *outMem, 0), "vkBindBufferMemory(host import)");
 }
 
+bool probeDmaBufCaps(DeviceContext* src, DeviceContext* dst) {
+    if (!src || !dst || !src->extDmaBuf || !dst->extDmaBuf || !src->extExternalMemoryFd ||
+        !dst->extExternalMemoryFd) {
+        return false;
+    }
+    src->loadDispatch();
+    if (!src->vk.GetMemoryFdKHR) return false;
+
+    const VkBufferUsageFlags usage =
+        VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    const VkExternalMemoryHandleTypeFlagBits handle =
+        VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+
+    VkPhysicalDeviceExternalBufferInfo srcInfo{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_BUFFER_INFO};
+    srcInfo.handleType = handle;
+    srcInfo.usage = usage;
+    VkExternalBufferProperties srcProps{VK_STRUCTURE_TYPE_EXTERNAL_BUFFER_PROPERTIES};
+    vkGetPhysicalDeviceExternalBufferProperties(src->physical, &srcInfo, &srcProps);
+    const auto srcFeat = srcProps.externalMemoryProperties.externalMemoryFeatures;
+    if (!(srcFeat & VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT)) return false;
+
+    VkPhysicalDeviceExternalBufferInfo dstInfo{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_BUFFER_INFO};
+    dstInfo.handleType = handle;
+    dstInfo.usage = usage;
+    VkExternalBufferProperties dstProps{VK_STRUCTURE_TYPE_EXTERNAL_BUFFER_PROPERTIES};
+    vkGetPhysicalDeviceExternalBufferProperties(dst->physical, &dstInfo, &dstProps);
+    const auto dstFeat = dstProps.externalMemoryProperties.externalMemoryFeatures;
+    if (!(dstFeat & VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT)) return false;
+    return true;
+}
+
+// Export a transfer buffer from src as dma-buf and import it on dst.
+void createDmaBufPair(DeviceContext* src, DeviceContext* dst, VkDeviceSize size, VkBuffer* outSrcBuf,
+                      VkDeviceMemory* outSrcMem, VkBuffer* outDstBuf, VkDeviceMemory* outDstMem) {
+    src->loadDispatch();
+    dst->loadDispatch();
+    auto& sd = src->vk;
+    auto& dd = dst->vk;
+    if (!sd.GetMemoryFdKHR) throw std::runtime_error("GetMemoryFdKHR missing on src");
+
+    const VkExternalMemoryHandleTypeFlagBits handle =
+        VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+
+    VkExternalMemoryBufferCreateInfo extBuf{VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO};
+    extBuf.handleTypes = handle;
+
+    VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bci.pNext = &extBuf;
+    bci.size = size;
+    bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    vkCheck(sd.CreateBuffer(src->device, &bci, nullptr, outSrcBuf), "vkCreateBuffer(dma src)");
+
+    VkMemoryRequirements req{};
+    sd.GetBufferMemoryRequirements(src->device, *outSrcBuf, &req);
+
+    VkExportMemoryAllocateInfo exportInfo{VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO};
+    exportInfo.handleTypes = handle;
+
+    // Prefer device-local; fall back to host-visible (PRIME often stages through sysmem).
+    uint32_t typeIndex = 0;
+    try {
+        typeIndex = findMemoryType(src->physical, req.memoryTypeBits,
+                                   VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    } catch (...) {
+        typeIndex = findMemoryTypePrefer(src->physical, req.memoryTypeBits,
+                                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
+                                         VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    }
+
+    VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    mai.pNext = &exportInfo;
+    mai.allocationSize = std::max(req.size, size);
+    mai.memoryTypeIndex = typeIndex;
+    vkCheck(sd.AllocateMemory(src->device, &mai, nullptr, outSrcMem), "vkAllocateMemory(dma src)");
+    vkCheck(sd.BindBufferMemory(src->device, *outSrcBuf, *outSrcMem, 0),
+            "vkBindBufferMemory(dma src)");
+
+    VkMemoryGetFdInfoKHR fdInfo{VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR};
+    fdInfo.memory = *outSrcMem;
+    fdInfo.handleType = handle;
+    int fd = -1;
+    vkCheck(sd.GetMemoryFdKHR(src->device, &fdInfo, &fd), "vkGetMemoryFdKHR");
+    if (fd < 0) throw std::runtime_error("vkGetMemoryFdKHR returned invalid fd");
+
+    // Import on dst (takes ownership of fd on success).
+    VkExternalMemoryBufferCreateInfo dstExt{VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO};
+    dstExt.handleTypes = handle;
+    VkBufferCreateInfo dbci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    dbci.pNext = &dstExt;
+    dbci.size = size;
+    dbci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    dbci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    VkResult cr = dd.CreateBuffer(dst->device, &dbci, nullptr, outDstBuf);
+    if (cr != VK_SUCCESS) {
+        ::close(fd);
+        destroyImportedBuffer(src, *outSrcBuf, *outSrcMem);
+        throw std::runtime_error("vkCreateBuffer(dma dst) failed");
+    }
+
+    VkMemoryRequirements dreq{};
+    dd.GetBufferMemoryRequirements(dst->device, *outDstBuf, &dreq);
+
+    VkImportMemoryFdInfoKHR import{VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR};
+    import.handleType = handle;
+    import.fd = fd;
+
+    VkMemoryAllocateInfo dmai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    dmai.pNext = &import;
+    dmai.allocationSize = std::max(dreq.size, size);
+    try {
+        dmai.memoryTypeIndex =
+            findMemoryType(dst->physical, dreq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    } catch (...) {
+        dmai.memoryTypeIndex = findMemoryTypePrefer(dst->physical, dreq.memoryTypeBits,
+                                                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
+                                                    VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    }
+
+    cr = dd.AllocateMemory(dst->device, &dmai, nullptr, outDstMem);
+    if (cr != VK_SUCCESS) {
+        // Spec: failed import does not consume fd.
+        ::close(fd);
+        destroyImportedBuffer(dst, *outDstBuf, *outDstMem);
+        destroyImportedBuffer(src, *outSrcBuf, *outSrcMem);
+        throw std::runtime_error("vkAllocateMemory(dma import) failed");
+    }
+    vkCheck(dd.BindBufferMemory(dst->device, *outDstBuf, *outDstMem, 0),
+            "vkBindBufferMemory(dma dst)");
+}
+
 void copyImageToBuffer(DeviceContext* ctx, VkCommandBuffer cmd, VkImage src, VkBuffer dst,
                        uint32_t w, uint32_t h) {
     VkBufferImageCopy region{};
@@ -99,13 +233,41 @@ void copyImage(DeviceContext* ctx, VkCommandBuffer cmd, VkImage src, VkImage dst
 
 } // namespace
 
+const char* FrameTransfer::backendName(TransferBackend b) {
+    switch (b) {
+    case TransferBackend::DmaBuf:
+        return "dma_buf";
+    case TransferBackend::SharedHost:
+        return "shared_host";
+    default:
+        return "memcpy";
+    }
+}
+
 void FrameTransfer::init(DeviceContext* src, DeviceContext* dst) {
     srcCtx = src;
     dstCtx = dst;
-    useSharedHost = src->extExternalMemoryHost && dst->extExternalMemoryHost;
 
     srcCtx->loadDispatch();
     dstCtx->loadDispatch();
+
+    // NVIDIA↔Mesa dma-buf often probes OK then DEVICE_LOSTs on first submit
+    // ("Not enough memory for command submission" on RADV). Prefer shared-host there
+    // unless XFSR_DMABUF=1 forces a try.
+    const char* forceDma = std::getenv("XFSR_DMABUF");
+    const bool nvidiaInvolved =
+        src->props.vendorID == 0x10deu || dst->props.vendorID == 0x10deu;
+    const bool wantDma =
+        probeDmaBufCaps(src, dst) &&
+        ((forceDma && forceDma[0] == '1') || (!nvidiaInvolved && !(forceDma && forceDma[0] == '0')));
+    if (wantDma) {
+        backend = TransferBackend::DmaBuf;
+    } else if (src->extExternalMemoryHost && dst->extExternalMemoryHost) {
+        backend = TransferBackend::SharedHost;
+    } else {
+        backend = TransferBackend::Memcpy;
+    }
+    useSharedHost = backend == TransferBackend::SharedHost;
 
     VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
     pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
@@ -136,8 +298,7 @@ void FrameTransfer::init(DeviceContext* src, DeviceContext* dst) {
                 "xfer dst fence");
     }
 
-    std::printf("FrameTransfer: shared_host=%d (VK_EXT_external_memory_host)\n",
-                useSharedHost ? 1 : 0);
+    std::printf("FrameTransfer: backend=%s\n", backendName(backend));
 }
 
 void FrameTransfer::resize(uint32_t w, uint32_t h, VkFormat fmt, uint32_t bpp) {
@@ -151,7 +312,26 @@ void FrameTransfer::resize(uint32_t w, uint32_t h, VkFormat fmt, uint32_t bpp) {
         std::max(srcCtx->minHostPointerAlignment, dstCtx->minHostPointerAlignment);
     const VkDeviceSize rawBytes =
         static_cast<VkDeviceSize>(w) * static_cast<VkDeviceSize>(h) * bpp;
-    const VkDeviceSize allocBytes = alignUp(rawBytes, align);
+    const VkDeviceSize allocBytes = alignUp(rawBytes, align ? align : 4096);
+
+    // Probe dma-buf once so all slots share the same backend.
+    if (backend == TransferBackend::DmaBuf) {
+        VkBuffer tSrcBuf = VK_NULL_HANDLE, tDstBuf = VK_NULL_HANDLE;
+        VkDeviceMemory tSrcMem = VK_NULL_HANDLE, tDstMem = VK_NULL_HANDLE;
+        try {
+            createDmaBufPair(srcCtx, dstCtx, allocBytes, &tSrcBuf, &tSrcMem, &tDstBuf, &tDstMem);
+            destroyImportedBuffer(srcCtx, tSrcBuf, tSrcMem);
+            destroyImportedBuffer(dstCtx, tDstBuf, tDstMem);
+        } catch (const std::exception& e) {
+            std::fprintf(stderr,
+                         "[xfsr] dma-buf staging failed (%s) — falling back to shared_host/memcpy\n",
+                         e.what());
+            backend = srcCtx->extExternalMemoryHost && dstCtx->extExternalMemoryHost
+                          ? TransferBackend::SharedHost
+                          : TransferBackend::Memcpy;
+            useSharedHost = backend == TransferBackend::SharedHost;
+        }
+    }
 
     for (int i = 0; i < kSlots; ++i) {
         Slot& s = slots[i];
@@ -167,7 +347,10 @@ void FrameTransfer::resize(uint32_t w, uint32_t h, VkFormat fmt, uint32_t bpp) {
         s.dstOptimal.destroy();
         s.pendingUpload = false;
 
-        if (useSharedHost) {
+        if (backend == TransferBackend::DmaBuf) {
+            createDmaBufPair(srcCtx, dstCtx, allocBytes, &s.srcBuf, &s.srcMem, &s.dstBuf,
+                             &s.dstMem);
+        } else if (backend == TransferBackend::SharedHost) {
             void* ptr = nullptr;
             if (posix_memalign(&ptr, static_cast<size_t>(align), static_cast<size_t>(allocBytes)) !=
                     0 ||
@@ -217,10 +400,9 @@ void FrameTransfer::resize(uint32_t w, uint32_t h, VkFormat fmt, uint32_t bpp) {
             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, VK_IMAGE_TILING_OPTIMAL, true);
     }
 
-    std::printf("Transfer staging %ux%u fmt=0x%x bpp=%u bytes=%llu path=%s align=%llu\n", w, h,
+    std::printf("Transfer staging %ux%u fmt=0x%x bpp=%u bytes=%llu backend=%s align=%llu\n", w, h,
                 static_cast<unsigned>(format), bytesPerPixel,
-                static_cast<unsigned long long>(allocBytes),
-                useSharedHost ? "shared_host" : "cached_memcpy",
+                static_cast<unsigned long long>(allocBytes), backendName(backend),
                 static_cast<unsigned long long>(align));
 }
 
@@ -286,7 +468,7 @@ const GpuImage& FrameTransfer::transferSync(const GpuImage& srcOptimal, double& 
                     VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
                     VK_ACCESS_TRANSFER_READ_BIT);
 
-    if (useSharedHost) {
+    if (usesGpuBuffer()) {
         copyImageToBuffer(srcCtx, s.srcCmd, srcOptimal.image, s.srcBuf, width, height);
     } else {
         transitionImage(srcCtx, s.srcCmd, s.srcLinear.image, VK_IMAGE_LAYOUT_UNDEFINED,
@@ -313,7 +495,7 @@ const GpuImage& FrameTransfer::transferSync(const GpuImage& srcOptimal, double& 
     vkCheck(sd.WaitForFences(srcCtx->device, 1, &s.srcFence, VK_TRUE, UINT64_MAX),
             "xfer fence download");
 
-    if (!useSharedHost) {
+    if (!usesGpuBuffer()) {
         s.srcLinear.invalidateMapped();
         auto t0 = std::chrono::steady_clock::now();
         const auto* srcBytes = static_cast<const uint8_t*>(s.srcLinear.mapped) + s.srcLinear.offset;
@@ -338,7 +520,7 @@ const GpuImage& FrameTransfer::transferSync(const GpuImage& srcOptimal, double& 
                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                     VK_PIPELINE_STAGE_TRANSFER_BIT, 0, VK_ACCESS_TRANSFER_WRITE_BIT);
 
-    if (useSharedHost) {
+    if (usesGpuBuffer()) {
         copyBufferToImage(dstCtx, s.dstCmd, s.dstBuf, s.dstOptimal.image, width, height);
     } else {
         transitionImage(dstCtx, s.dstCmd, s.dstLinear.image, VK_IMAGE_LAYOUT_UNDEFINED,
@@ -371,7 +553,7 @@ const GpuImage& FrameTransfer::transferPipeline(const GpuImage& srcOptimal, doub
                                                 VkImageLayout srcLayout) {
     // Memcpy path cannot overlap cleanly across devices — stay fully sync.
     // transferSync always assumes SHADER_READ_ONLY; transition if needed.
-    if (!pipelined || !useSharedHost) {
+    if (!pipelined || !usesGpuBuffer()) {
         if (srcLayout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
             srcCtx->resetAndBegin();
             transitionImage(srcCtx, srcCtx->cmd, srcOptimal.image, srcLayout,
@@ -488,7 +670,7 @@ void FrameTransfer::recordDownload(VkCommandBuffer cmd, const GpuImage& srcOptim
                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                     VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_MEMORY_WRITE_BIT,
                     VK_ACCESS_TRANSFER_READ_BIT);
-    if (useSharedHost) {
+    if (usesGpuBuffer()) {
         copyImageToBuffer(srcCtx, cmd, srcOptimal.image, s.srcBuf, width, height);
     } else {
         transitionImage(srcCtx, cmd, s.srcLinear.image, VK_IMAGE_LAYOUT_UNDEFINED,
@@ -512,7 +694,7 @@ void FrameTransfer::recordUpload(VkCommandBuffer cmd, int slot) {
     transitionImage(dstCtx, cmd, s.dstOptimal.image, VK_IMAGE_LAYOUT_UNDEFINED,
                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                     VK_PIPELINE_STAGE_TRANSFER_BIT, 0, VK_ACCESS_TRANSFER_WRITE_BIT);
-    if (useSharedHost) {
+    if (usesGpuBuffer()) {
         copyBufferToImage(dstCtx, cmd, s.dstBuf, s.dstOptimal.image, width, height);
     } else {
         transitionImage(dstCtx, cmd, s.dstLinear.image, VK_IMAGE_LAYOUT_UNDEFINED,

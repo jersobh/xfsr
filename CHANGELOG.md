@@ -5,7 +5,36 @@ All notable changes to **xfsr** / **xfsr-run** are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [0.2.4] — 2026-10-24
+
+### Added
+
+- `xfsr-run --one-way` / `--no-one-way` (sets `XFSR_IGPU_PRESENT`; `--one-way` implies
+  `--offload`)
+
+### Fixed
+
+- NVIDIA `--one-way`: opaque WSI SIGSEGV on swapchain recreate / MangoHud — ignore
+  one-way on NVIDIA unless `XFSR_IGPU_PRESENT=force`
+- `glmark2-wayland`: keep `WAYLAND_DISPLAY` for `*-wayland` binaries (was cleared for
+  Zink and failed canvas init)
+- Zink windowed postage-stamp: don’t treat `DISPLAY_EXTENT` hint as the real window;
+  only caps-honor when app extent matches expected render size; tighten GL shim remap;
+  caps-shrink for Zink on iGPU too
+
+### Changed
+
+- Document offload knobs (`XFSR_IGPU_PRESENT`, `XFSR_DMABUF`) in README
+
 ## [0.2.3] — 2026-10-24
+
+### Added
+
+- Offload present policy: try **one-way iGPU present** on Mesa dGPUs; auto-fallback
+  to **round-trip** (dGPU WSI) on create/present failure; `XFSR_IGPU_PRESENT=0|1`
+- `FrameTransfer` backends: **dma-buf** → shared-host → memcpy (pipelined for
+  dma-buf/host); `XFSR_DMABUF=0|1` override. NVIDIA↔Mesa skips dma-buf by default
+  (probes OK then DEVICE_LOSTs on RADV)
 
 ### Fixed
 
@@ -23,6 +52,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ### Changed
 
 - Caps-shrink enabled for native Vulkan by default (`XFSR_CAPS_SHRINK=0` for Source2)
+- NVIDIA hybrids: `--offload` defaults to round-trip (one-way opt-in via
+  `XFSR_IGPU_PRESENT=1`)
 
 ## [0.2.0] — 2026-10-24
 
@@ -67,6 +98,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - Dual-GPU `SURFACE_LOST` / early `OUT_OF_DATE` (opaque app handle + iGPU-only window WSI)
 - Caps-shrink vs Zink EGL drawable mismatch
 
+[0.2.4]: https://github.com/jersobh/xfsr/releases/tag/v0.2.4
 [0.2.3]: https://github.com/jersobh/xfsr/releases/tag/v0.2.3
 [0.2.0]: https://github.com/jersobh/xfsr/releases/tag/v0.2.0
 [0.1.0]: https://github.com/jersobh/xfsr/releases/tag/v0.1.0

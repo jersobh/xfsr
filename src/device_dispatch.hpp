@@ -43,6 +43,7 @@ struct DeviceDispatch {
     PFN_vkFlushMappedMemoryRanges FlushMappedMemoryRanges = nullptr;
     PFN_vkInvalidateMappedMemoryRanges InvalidateMappedMemoryRanges = nullptr;
     PFN_vkGetMemoryHostPointerPropertiesEXT GetMemoryHostPointerPropertiesEXT = nullptr;
+    PFN_vkGetMemoryFdKHR GetMemoryFdKHR = nullptr;
 
     PFN_vkCreateImage CreateImage = nullptr;
     PFN_vkDestroyImage DestroyImage = nullptr;
@@ -118,6 +119,7 @@ struct DeviceDispatch {
         LOAD(FlushMappedMemoryRanges);
         LOAD(InvalidateMappedMemoryRanges);
         LOAD(GetMemoryHostPointerPropertiesEXT);
+        LOAD(GetMemoryFdKHR);
         LOAD(CreateImage);
         LOAD(DestroyImage);
         LOAD(GetImageMemoryRequirements);

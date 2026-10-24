@@ -1,10 +1,11 @@
 // VK_LAYER_XFSR — dual-GPU FSR1 offload (demo mode 2).
 // Enable: ENABLE_XFSR=1
 // Config: XFSR_FSR=1 XFSR_PRESET=quality|balanced|performance|ultra
-//         XFSR_OFFLOAD=1 (default)
+//         XFSR_OFFLOAD=1  XFSR_IGPU_PRESENT=0|1 (one-way try; 0=round-trip only)
 // Legacy CROSSVULKAN_* env names still accepted.
 //
-// Proxy swapchain: app gets low-res dGPU images; real present is iGPU + FSR1.
+// Proxy swapchain: app gets low-res dGPU images; prefer iGPU present (one-way),
+// else dGPU WSI + iGPU FSR round-trip.
 
 #ifndef VK_NO_PROTOTYPES
 #define VK_NO_PROTOTYPES
@@ -187,6 +188,13 @@ bool offloadEnabled() {
     return o[0] != '0';
 }
 
+struct DeviceData; // forward — igpuPresentWanted reads dGPU vendor
+
+// One-way iGPU present: XFSR_IGPU_PRESENT=0 → round-trip only; =1 → force one-way.
+// Default: try one-way on Mesa dGPUs; NVIDIA hybrids default to round-trip (Phase B —
+// one-way WSI can create then DEVICE_LOST on transfer/present with MangoHud leaks).
+bool igpuPresentWanted(const DeviceData* dd);
+
 // When the app ignores caps shrink (DXVK/Proton often does), force render extent in
 // CreateSwapchain. Default ON when FSR is enabled. XFSR_FORCE_SCALE=0 disables.
 // WARNING: force-scale must NEVER create proxy images smaller than the app's
@@ -302,9 +310,11 @@ struct DeviceData {
 
     FrameTransfer xfer{};
     bool xferReady = false;
-    // Zink+offload: FSR result iGPU → dGPU (present stays on dGPU WSI).
+    // Round-trip offload: FSR result iGPU → dGPU (present stays on dGPU WSI).
     FrameTransfer xferBack{};
     bool xferBackReady = false;
+    // After one-way WSI/present failure, prefer round-trip on next setup.
+    bool forceRoundTripOffload = false;
 
     // Stable storage if we inject device extensions into CreateDevice.
     std::vector<std::string> injectedExtNames;
@@ -362,9 +372,9 @@ struct ProxySwapchain {
     FsrPass fsr{};
     bool pipelineReady = false;
     bool offloadIgpu = false; // true: FrameTransfer → iGPU (FSR and/or present)
-    // Hybrid NVIDIA dGPU + AMD iGPU: an iGPU-owned window WSI (opaque app handle)
-    // SIGSEGVs when the app/MangoHud/ICD leak WSI calls to the NVIDIA dispatch.
-    // Always keep present on the dGPU; FSR on iGPU via host round-trip.
+    // Round-trip: dGPU owns window WSI; iGPU runs FSR; frame hauled back for present.
+    // One-way: iGPU owns WSI (opaque app handle). Prefer one-way; fall back on failure
+    // (NVIDIA hybrids historically SIGSEGV when apps leak WSI to the wrong ICD).
     bool zinkOffloadRoundtrip = false;
     bool useFsr = false;      // FSR1 EASU/RCAS when XFSR_FSR=1 and scaling
 
@@ -397,6 +407,34 @@ ProxySwapchain* proxyOf(VkSwapchainKHR s) {
 // Present WSI stays on the app/dGPU device whenever round-trip offload is used.
 bool presentsOnIgpu(const ProxySwapchain* ps) {
     return ps && ps->offloadIgpu && !ps->zinkOffloadRoundtrip;
+}
+
+bool igpuPresentWanted(const DeviceData* dd) {
+    const char* o = xfsrEnv("XFSR_IGPU_PRESENT", "CROSSVULKAN_IGPU_PRESENT");
+    if (o && o[0] == '0') return false;
+    const bool nvidia = dd && dd->dgpuReady && dd->dgpu.props.vendorID == 0x10deu;
+    // NVIDIA + opaque app swapchain: first present can work, then recreate/MangoHud
+    // leaks WSI into the NVIDIA ICD → SIGSEGV (vkcube --one-way). Refuse unless forced.
+    if (nvidia) {
+        if (o && (std::strcmp(o, "force") == 0 || o[0] == '2')) {
+            std::fprintf(stderr,
+                         "[xfsr] WARNING: forcing one-way on NVIDIA — likely SIGSEGV with "
+                         "MangoHud/recreate\n");
+            return true;
+        }
+        if (o && o[0] == '1') {
+            static bool loggedIgnore = false;
+            if (!loggedIgnore) {
+                loggedIgnore = true;
+                std::fprintf(stderr,
+                             "[xfsr] --one-way ignored on NVIDIA (opaque WSI SIGSEGV on recreate); "
+                             "using round-trip. XFSR_IGPU_PRESENT=force to override.\n");
+            }
+        }
+        return false;
+    }
+    if (o && o[0] == '1') return true;
+    return true; // Mesa dGPU: try one-way
 }
 
 // Monotonic opaque swapchain ids — never reuse heap addresses as VkSwapchainKHR
@@ -666,13 +704,20 @@ bool setupOffloadPipeline(ProxySwapchain* ps, VkSwapchainKHR oldPresentSwapchain
                 logv("[xfsr] no scale (render==display) — skip dual-GPU transfer\n");
             }
         }
-        // Always round-trip when offloading: dGPU owns the window WSI (real ICD
-        // handle for the app/MangoHud), iGPU runs FSR. Classic iGPU-present used an
-        // opaque fake swapchain and SIGSEGV'd under vkcube/MangoHud/NVIDIA leaks.
-        ps->zinkOffloadRoundtrip = ps->offloadIgpu;
-        if (ps->zinkOffloadRoundtrip) {
-            logv("[xfsr] offload: dGPU WSI + iGPU FSR (round-trip)%s\n",
-                 zinkActive() ? " [zink]" : "");
+        // Prefer one-way iGPU present; round-trip when forced or XFSR_IGPU_PRESENT=0.
+        if (ps->offloadIgpu) {
+            const bool wantOneWay = igpuPresentWanted(dd) && !dd->forceRoundTripOffload;
+            ps->zinkOffloadRoundtrip = !wantOneWay;
+            if (ps->zinkOffloadRoundtrip) {
+                logv("[xfsr] offload: dGPU WSI + iGPU FSR (round-trip)%s%s\n",
+                     zinkActive() ? " [zink]" : "",
+                     dd->forceRoundTripOffload ? " [forced]" : "");
+            } else {
+                logv("[xfsr] offload: try one-way iGPU present%s\n",
+                     zinkActive() ? " [zink]" : "");
+            }
+        } else {
+            ps->zinkOffloadRoundtrip = false;
         }
         DeviceContext* presentCtx =
             presentsOnIgpu(ps) ? &dd->igpu : &dd->dgpu;
@@ -683,14 +728,8 @@ bool setupOffloadPipeline(ProxySwapchain* ps, VkSwapchainKHR oldPresentSwapchain
                 dd->xferReady = true;
             }
             dd->xfer.resize(ps->renderW, ps->renderH, ps->format, 4);
-            if (ps->zinkOffloadRoundtrip) {
-                if (!dd->xferBackReady) {
-                    dd->xferBack.init(&dd->igpu, &dd->dgpu);
-                    dd->xferBackReady = true;
-                }
-                // FSR output is always RGBA8 UNORM at display size.
-                dd->xferBack.resize(ps->displayW, ps->displayH, VK_FORMAT_R8G8B8A8_UNORM, 4);
-            }
+            logv("[xfsr] transfer backend=%s (dGPU→iGPU)\n",
+                 FrameTransfer::backendName(dd->xfer.backend));
         }
 
         // Any caps query during WSI create must see the true window extent.
@@ -767,18 +806,20 @@ bool setupOffloadPipeline(ProxySwapchain* ps, VkSwapchainKHR oldPresentSwapchain
             return createWsi(ctx, igpuWsi, {presentW, presentH}, presentUsageBlit, oldSc, out);
         };
 
-        // Display-sized WSI only. Classic dual-GPU: iGPU owns the window; app handle is
-        // opaque (no second WSI). Zink round-trip: dGPU owns the window (real ICD handle).
+        // Display-sized WSI only. One-way: iGPU owns the window (opaque app handle).
+        // Round-trip: dGPU owns the window (real ICD handle for app/MangoHud).
         (void)shadowUsage;
         (void)oldAppSwapchain;
         VkResult cr = VK_ERROR_INITIALIZATION_FAILED;
         if (presentsOnIgpu(ps)) {
             cr = createPresentWsi(&dd->igpu, true, oldPresentSwapchain, &ps->realSwapchain);
             if (cr != VK_SUCCESS) {
-                logv("[xfsr] iGPU present swapchain failed: %d (fmt=%u) — same-GPU fallback\n",
-                     static_cast<int>(cr), static_cast<unsigned>(ps->format));
-                ps->offloadIgpu = false;
-                ps->zinkOffloadRoundtrip = false;
+                std::fprintf(stderr,
+                             "[xfsr] iGPU present swapchain failed: %d — fall back to round-trip\n",
+                             static_cast<int>(cr));
+                dd->forceRoundTripOffload = true;
+                ps->zinkOffloadRoundtrip = true;
+                ps->opaqueAppHandle = false;
             } else {
                 presentCtx = &dd->igpu;
                 ps->opaqueAppHandle = true;
@@ -788,6 +829,16 @@ bool setupOffloadPipeline(ProxySwapchain* ps, VkSwapchainKHR oldPresentSwapchain
         }
 
         if (!presentsOnIgpu(ps)) {
+            // Round-trip (or same-GPU): ensure back-haul transfer is ready when offloading.
+            if (ps->offloadIgpu && ps->zinkOffloadRoundtrip) {
+                if (!dd->xferBackReady) {
+                    dd->xferBack.init(&dd->igpu, &dd->dgpu);
+                    dd->xferBackReady = true;
+                }
+                dd->xferBack.resize(ps->displayW, ps->displayH, VK_FORMAT_R8G8B8A8_UNORM, 4);
+                logv("[xfsr] transfer backend=%s (iGPU→dGPU back-haul)\n",
+                     FrameTransfer::backendName(dd->xferBack.backend));
+            }
             presentCtx = &dd->dgpu;
             ps->opaqueAppHandle = false;
             cr = createPresentWsi(&dd->dgpu, false,
@@ -1064,7 +1115,9 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_GetPhysicalDeviceSurfaceCapabilitiesKHR(
         VkPhysicalDeviceProperties props{};
         id->GetPhysicalDeviceProperties(physicalDevice, &props);
         const bool discrete = props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
-        if (!discrete) return r;
+        // Zink on iGPU (common for glmark2-wayland) still needs shrink — otherwise the
+        // GL drawable stays window-sized and the shim postage-stamps into a corner.
+        if (!discrete && !zinkActive()) return r;
     }
 
     // Shrink currentExtent to render size; maxImageExtent stays at the window so
@@ -1143,48 +1196,64 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateDevice(VkPhysicalDevice physicalDevice
     VkPhysicalDeviceProperties propsEarly{};
     if (id && id->GetPhysicalDeviceProperties)
         id->GetPhysicalDeviceProperties(physicalDevice, &propsEarly);
-    const bool wantHostExt =
+    const bool wantXferExts =
         propsEarly.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU && fsrEnabled() &&
-        offloadEnabled(); // only needed for dual-GPU FrameTransfer
+        offloadEnabled(); // dual-GPU FrameTransfer (host / dma-buf)
 
     VkDeviceCreateInfo ci = *pCreateInfo;
     std::vector<const char*> extPtrs;
-    bool injectedHost = false;
-    if (wantHostExt && pCreateInfo) {
-        bool already = false;
-        for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; ++i) {
+    std::vector<std::string> newlyInjected;
+    if (wantXferExts && pCreateInfo) {
+        for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; ++i)
             extPtrs.push_back(pCreateInfo->ppEnabledExtensionNames[i]);
-            if (std::strcmp(pCreateInfo->ppEnabledExtensionNames[i],
-                            VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME) == 0)
-                already = true;
-        }
-        if (!already) {
-            // Probe support via next GIPA / volk instance dispatch.
-            uint32_t extCount = 0;
-            vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &extCount, nullptr);
-            std::vector<VkExtensionProperties> avail(extCount);
-            if (extCount)
-                vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &extCount,
-                                                     avail.data());
-            for (const auto& e : avail) {
-                if (std::strcmp(e.extensionName, VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME) ==
-                    0) {
-                    extPtrs.push_back(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
-                    ci.enabledExtensionCount = static_cast<uint32_t>(extPtrs.size());
-                    ci.ppEnabledExtensionNames = extPtrs.data();
-                    injectedHost = true;
-                    break;
-                }
+
+        auto alreadyEnabled = [&](const char* name) {
+            for (const char* e : extPtrs) {
+                if (std::strcmp(e, name) == 0) return true;
             }
+            return false;
+        };
+        auto availHas = [&](const char* name, const std::vector<VkExtensionProperties>& avail) {
+            for (const auto& e : avail) {
+                if (std::strcmp(e.extensionName, name) == 0) return true;
+            }
+            return false;
+        };
+
+        uint32_t extCount = 0;
+        vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &extCount, nullptr);
+        std::vector<VkExtensionProperties> avail(extCount);
+        if (extCount)
+            vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &extCount, avail.data());
+
+        const char* candidates[] = {
+            VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME,
+            VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
+            VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME,
+        };
+        for (const char* name : candidates) {
+            if (alreadyEnabled(name) || !availHas(name, avail)) continue;
+            // dma_buf requires external_memory_fd
+            if (std::strcmp(name, VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME) == 0 &&
+                !alreadyEnabled(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME) &&
+                !availHas(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME, avail)) {
+                continue;
+            }
+            extPtrs.push_back(name);
+            newlyInjected.emplace_back(name);
+        }
+        if (!newlyInjected.empty()) {
+            ci.enabledExtensionCount = static_cast<uint32_t>(extPtrs.size());
+            ci.ppEnabledExtensionNames = extPtrs.data();
         }
     }
 
     VkResult r = create(physicalDevice, &ci, pAllocator, pDevice);
-    if (r != VK_SUCCESS && injectedHost) {
-        logv("[xfsr] CreateDevice with external_memory_host failed (%d); retrying without\n",
+    if (r != VK_SUCCESS && !newlyInjected.empty()) {
+        logv("[xfsr] CreateDevice with transfer exts failed (%d); retrying without\n",
              static_cast<int>(r));
         r = create(physicalDevice, pCreateInfo, pAllocator, pDevice);
-        injectedHost = false;
+        newlyInjected.clear();
     }
     if (r != VK_SUCCESS) return r;
 
@@ -1193,9 +1262,9 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateDevice(VkPhysicalDevice physicalDevice
     dd->physical = physicalDevice;
     dd->inst = id;
     dd->gdpa = gdpa;
-    if (injectedHost) {
-        dd->injectedExtNames.emplace_back(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
-        logv("[xfsr] injected %s on discrete device\n", VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
+    for (const auto& name : newlyInjected) {
+        dd->injectedExtNames.push_back(name);
+        logv("[xfsr] injected %s on discrete device\n", name.c_str());
     }
     dd->DestroyDevice = getDevProc<PFN_vkDestroyDevice>(dd, "vkDestroyDevice");
     dd->CreateSwapchainKHR = getDevProc<PFN_vkCreateSwapchainKHR>(dd, "vkCreateSwapchainKHR");
@@ -1440,13 +1509,25 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSwapchainKHR(VkDevice device,
     uint32_t hintW = 0, hintH = 0;
     const bool haveHint = displayExtentHint(dd->inst, &hintW, &hintH);
 
-    // Prefer compositor-measured size; fall back to last caps-shrink memory / hint.
-    if (!haveSurf && dd->inst && dd->inst->realW > 0 && dd->inst->realH > 0) {
+    // Prefer compositor-measured size; never the DISPLAY_EXTENT hint alone
+    // (that made glmark2 800x600 look like a shrunk 1080p → postage stamp).
+    if (!haveSurf && dd->inst && dd->inst->realFromSurface && dd->inst->realW > 0 &&
+        dd->inst->realH > 0) {
         surfW = dd->inst->realW;
         surfH = dd->inst->realH;
         haveSurf = true;
     }
-    if (haveSurf && (appW < surfW || appH < surfH)) {
+    // Caps-honored only when app extent ≈ expected render size for this scale.
+    // glmark2's default 800x600 window is NOT ultra's 768x432 render of 1080p.
+    auto looksLikeRenderSize = [&](uint32_t aw, uint32_t ah, uint32_t dw, uint32_t dh) {
+        uint32_t rw = 0, rh = 0;
+        computeRenderSize(dw, dh, scale, &rw, &rh);
+        const int tol = 16;
+        return std::abs(static_cast<int>(aw) - static_cast<int>(rw)) <= tol &&
+               std::abs(static_cast<int>(ah) - static_cast<int>(rh)) <= tol;
+    };
+    if (haveSurf && (appW < surfW || appH < surfH) &&
+        looksLikeRenderSize(appW, appH, surfW, surfH)) {
         // App honored caps shrink (native VK or Zink+shim) — present at true window.
         ps->displayW = surfW;
         ps->displayH = surfH;
@@ -1458,6 +1539,29 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSwapchainKHR(VkDevice device,
         } else {
             logv("[xfsr] caps-honored proxy: render %ux%u → display %ux%u\n", appW, appH, surfW,
                  surfH);
+        }
+    } else if (haveSurf && (appW < surfW || appH < surfH) &&
+               !looksLikeRenderSize(appW, appH, surfW, surfH)) {
+        // Smaller than surface but not our render size → real windowed app (e.g. glmark2
+        // 800x600 on a 1080p output). Present at the app/window size, not the output.
+        ps->displayW = appW;
+        ps->displayH = appH;
+        ps->renderW = appW;
+        ps->renderH = appH;
+        uint32_t rw = 0, rh = 0;
+        computeRenderSize(appW, appH, scale, &rw, &rh);
+        if (zinkActive() && (rw < appW || rh < appH)) {
+            // Caps-shrink should make the next recreate match; for this create keep
+            // images == app FB. Identity until Zink re-queries shrunk caps.
+            logv("[xfsr] zink windowed %ux%u (surf %ux%u was not render-sized) — wait caps-shrink\n",
+                 appW, appH, surfW, surfH);
+        } else {
+            logv("[xfsr] windowed app %ux%u (ignore surf/hint %ux%u)\n", appW, appH, surfW, surfH);
+        }
+        if (dd->inst) {
+            dd->inst->realW = appW;
+            dd->inst->realH = appH;
+            dd->inst->realFromSurface = true;
         }
     } else if (forceScaleEnabled() && !zinkActive()) {
         // Full-window create (DXVK / apps that ignore caps): present at window size,
@@ -1947,7 +2051,17 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
             }
             return VK_SUCCESS;
         }
-        if (acq != VK_SUCCESS && acq != VK_SUBOPTIMAL_KHR) return acq;
+        if (acq != VK_SUCCESS && acq != VK_SUBOPTIMAL_KHR) {
+            if (presentsOnIgpu(ps) && !dd->forceRoundTripOffload) {
+                dd->forceRoundTripOffload = true;
+                std::fprintf(stderr,
+                             "[xfsr] offload: acquire failed (%d) on one-way — fall back to "
+                             "round-trip\n",
+                             static_cast<int>(acq));
+                return VK_ERROR_OUT_OF_DATE_KHR;
+            }
+            return acq;
+        }
 
         vkCheck(pd.ResetCommandBuffer(cmd, 0), "reset cmd");
         VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -2131,19 +2245,27 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
         VkResult pr = wsi.QueuePresentKHR(presentQ, &pi);
         if (pr != VK_SUCCESS && pr != VK_SUBOPTIMAL_KHR && pr != VK_ERROR_OUT_OF_DATE_KHR) {
             std::fprintf(stderr, "[xfsr] QueuePresent failed: %d\n", static_cast<int>(pr));
+            if (presentsOnIgpu(ps) && !dd->forceRoundTripOffload) {
+                dd->forceRoundTripOffload = true;
+                std::fprintf(stderr,
+                             "[xfsr] offload: fall back to round-trip on next swapchain recreate "
+                             "(XFSR_IGPU_PRESENT=0 to skip one-way)\n");
+                return VK_ERROR_OUT_OF_DATE_KHR;
+            }
             return pr;
         }
-
         ps->frameSlot = (slot + 1) % ProxySwapchain::kFrames;
 
         ++ps->presentCount;
         if (!dd->loggedFirstPresent) {
             dd->loggedFirstPresent = true;
+            const char* mode = "";
+            if (ps->zinkOffloadRoundtrip)
+                mode = ", dual-GPU FSR round-trip";
+            else if (ps->offloadIgpu)
+                mode = ", dual-GPU one-way";
             std::fprintf(stderr, "[xfsr] first present ok (app img %u → display %ux%u%s)\n", idx,
-                         ps->displayW, ps->displayH,
-                         ps->zinkOffloadRoundtrip
-                             ? ", dual-GPU FSR round-trip"
-                             : (ps->offloadIgpu ? ", dual-GPU" : ""));
+                         ps->displayW, ps->displayH, mode);
         }
         if (verboseLog() &&
             (ps->presentCount == 60 || (ps->presentCount > 0 && ps->presentCount % 300 == 0))) {
@@ -2170,6 +2292,18 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
         return pr;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "[xfsr] present failed: %s\n", e.what());
+        if (presentsOnIgpu(ps) && dd && !dd->forceRoundTripOffload) {
+            dd->forceRoundTripOffload = true;
+            if (dd->xferReady) {
+                waitOffloadIdle(dd);
+                dd->xfer.destroy();
+                dd->xferReady = false;
+            }
+            std::fprintf(stderr,
+                         "[xfsr] offload: fall back to round-trip on next swapchain recreate "
+                         "(XFSR_IGPU_PRESENT=0 to skip one-way)\n");
+            return VK_ERROR_OUT_OF_DATE_KHR;
+        }
         return VK_ERROR_DEVICE_LOST;
     }
 }

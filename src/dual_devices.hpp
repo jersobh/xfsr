@@ -16,6 +16,8 @@ struct DeviceContext {
     VkPhysicalDeviceMemoryProperties memProps{};
     float timestampPeriod = 1.0f;
     bool extExternalMemoryHost = false;
+    bool extExternalMemoryFd = false;
+    bool extDmaBuf = false;
     bool supportsFp16 = false;
     bool ownsDevice = true; // false when adopt()'d (app owns VkDevice)
     // When set, destroy() uses the loader callback (companion devices from a layer).

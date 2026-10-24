@@ -6,7 +6,7 @@
 
 FSR 1.0 for Linux games — wrap a title like `gamemoderun`, get more FPS by rendering lower and upscaling.
 
-**Current version:** [0.2.3](https://github.com/jersobh/xfsr/releases/tag/v0.2.3)
+**Current version:** [0.2.4](https://github.com/jersobh/xfsr/releases/tag/v0.2.4)
 
 ## What it does
 
@@ -23,7 +23,7 @@ You do **not** need the game to support FSR. xfsr hooks in through a **Vulkan la
 | Mode | How | When to use |
 |------|-----|-------------|
 | **Same-GPU FSR** (default) | Game renders low-res on the GPU it already uses; that same GPU runs FSR and presents | Most games — usually the fastest and most stable |
-| **`--offload`** | Discrete GPU renders low-res; frame is handed to the **integrated GPU** for FSR + present | Hybrid laptops when you want the iGPU to do the upscale (best-effort; not every machine/driver likes this) |
+| **`--offload`** | Discrete GPU renders low-res; iGPU runs FSR. Prefers **one-way** iGPU present on Mesa dGPUs; **NVIDIA hybrids default to round-trip** (dGPU keeps the window WSI, frame hauled back after FSR). Transfer uses dma-buf when safe, else shared-host import | Hybrid laptops / experimentation — same-GPU is still usually faster |
 
 Presets control how hard it pushes:
 
@@ -85,13 +85,25 @@ xfsr-run --zink --preset performance --no-rcas glmark2
 | `--preset quality\|balanced\|performance\|ultra` | How much to lower render resolution (`ultra` = 2.5×) |
 | `--no-rcas` | Skip sharpening — usually more FPS |
 | `--offload` | Upscale on the iGPU (hybrid; skip for CS2) |
+| `--one-way` / `--no-one-way` | With offload: prefer iGPU present or force round-trip (`--one-way` implies `--offload`; ignored on NVIDIA — use `XFSR_IGPU_PRESENT=force` to override) |
 | `--mangohud` | FPS / frametime overlay |
 | `--zink` | OpenGL via Zink + viewport shim (off by default) |
 | `--print` | Show the env xfsr would set, then exit |
 
+Offload knobs (env; same as the flags above):
+
+| Env | Effect |
+|-----|--------|
+| `XFSR_IGPU_PRESENT=0` | Force round-trip (dGPU WSI) — same as `--no-one-way` |
+| `XFSR_IGPU_PRESENT=1` | Prefer one-way (Mesa); on NVIDIA falls back to round-trip |
+| `XFSR_IGPU_PRESENT=force` | Actually try one-way on NVIDIA (often SIGSEGV with MangoHud) |
+| `XFSR_DMABUF=1` | Force dma-buf transfer try (default skips NVIDIA↔Mesa) |
+| `XFSR_DMABUF=0` | Never use dma-buf |
+| `XFSR_VERBOSE=1` | Log `offload: …`, `transfer backend=…`, `first present ok` |
+
 ### OpenGL / Zink
 
-Pass **`--zink`** so `xfsr-run` sets Mesa Zink and preloads `libxfsr_gl_shim.so` (remaps `glViewport` / `glScissor`). Without `--zink`, native GL never hits the Vulkan layer. With `--offload`, Zink keeps the window WSI on the dGPU and runs FSR on the iGPU via an async host round-trip. On Wayland, `--zink` prefers X11/Xwayland unless `XFSR_ZINK_WAYLAND=1`.
+Pass **`--zink`** so `xfsr-run` sets Mesa Zink and preloads `libxfsr_gl_shim.so` (remaps `glViewport` / `glScissor`). Without `--zink`, native GL never hits the Vulkan layer. With `--offload` on NVIDIA hybrids, Zink keeps the window WSI on the dGPU and runs FSR on the iGPU via an async round-trip. On Wayland, `--zink` prefers X11/Xwayland unless `XFSR_ZINK_WAYLAND=1`.
 
 ## Build from source
 
@@ -107,12 +119,12 @@ Needs CMake ≥ 3.20, C++17, `glslc`, Vulkan loader. FSR1 headers: `third_party/
 
 ## Versioning
 
-- [`VERSION`](VERSION) — **0.2.3**
+- [`VERSION`](VERSION) — **0.2.4**
 - [`CHANGELOG.md`](CHANGELOG.md)
 - Tag `vX.Y.Z` → GitHub Actions builds the Linux package the install script downloads
 
 ```sh
-git tag v0.2.3 && git push origin v0.2.3
+git tag v0.2.4 && git push origin v0.2.4
 ```
 
 ## Credits

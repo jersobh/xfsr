@@ -36,6 +36,9 @@ FSR="${XFSR_FSR:-${CROSSVULKAN_FSR:-1}}"
 # often keep a stale =1 from testing, which enables dual-GPU DMA and can crash CS2.
 OFFLOAD=0
 OFFLOAD_CLI=0
+# Empty = layer default (NVIDIA→round-trip, Mesa→try one-way). CLI sets 0|1.
+ONE_WAY=""
+ONE_WAY_CLI=0
 RCAS="${XFSR_RCAS:-${CROSSVULKAN_RCAS:-1}}"
 
 if [[ "${XFSR_MANGOHUD:-0}" == "1" ]]; then
@@ -60,6 +63,9 @@ Options:
   --offload / --no-offload                dual-GPU: dGPU render + iGPU FSR (off by default;
                                           use for hybrid NVIDIA+AMD max throughput;
                                           can still stress some Proton titles — try without if unstable)
+  --one-way / --no-one-way                with --offload: prefer iGPU present or force
+                                          round-trip; implies --offload. On NVIDIA, --one-way
+                                          is ignored (SIGSEGV); XFSR_IGPU_PRESENT=force to try.
   --rcas / --no-rcas                      FSR1 sharpening pass (default: on; --no-rcas = EASU only)
   --zink / --no-zink                      Mesa Zink for OpenGL→Vulkan (default: auto —
                                           on for glmark2/native GL, off for Proton/Vulkan)
@@ -110,6 +116,8 @@ while [[ $# -gt 0 ]]; do
     --fsr=*) FSR="${1#*=}"; shift ;;
     --offload) OFFLOAD=1; OFFLOAD_CLI=1; shift ;;
     --no-offload) OFFLOAD=0; OFFLOAD_CLI=1; shift ;;
+    --one-way) ONE_WAY=1; ONE_WAY_CLI=1; OFFLOAD=1; OFFLOAD_CLI=1; shift ;;
+    --no-one-way) ONE_WAY=0; ONE_WAY_CLI=1; shift ;;
     --rcas) RCAS=1; shift ;;
     --no-rcas) RCAS=0; shift ;;
     --layer-dir)
@@ -382,6 +390,9 @@ export XFSR_FSR="$FSR"
 export XFSR_PRESET="$PRESET"
 export XFSR_OFFLOAD="$OFFLOAD"
 export XFSR_RCAS="$RCAS"
+if [[ $ONE_WAY_CLI -eq 1 ]]; then
+  export XFSR_IGPU_PRESENT="$ONE_WAY"
+fi
 # Wayland: ICD currentExtent is often UINT_MAX — seed the layer so caps-shrink works
 # on the first CreateSwapchain (otherwise identity @ full res, flat bench FPS).
 export XFSR_OUTPUT_W="$OUT_W"
@@ -397,15 +408,31 @@ if [[ -z "${XFSR_LAYER_FSR:-}" ]]; then
   export XFSR_LAYER_FSR="$FSR"
 fi
 
-echo "xfsr-run: layer ${LAYER_DIR} (ENABLE_XFSR=1 preset=$PRESET scale=$SCALE offload=$OFFLOAD)" >&2
+_ow_msg=""
+if [[ -n "${XFSR_IGPU_PRESENT:-}" ]]; then
+  if [[ "$XFSR_IGPU_PRESENT" == "1" ]]; then _ow_msg=" one-way=1"; else _ow_msg=" one-way=0"; fi
+fi
+echo "xfsr-run: layer ${LAYER_DIR} (ENABLE_XFSR=1 preset=$PRESET scale=$SCALE offload=$OFFLOAD${_ow_msg})" >&2
+unset _ow_msg
 
 if [[ $USE_ZINK -eq 1 ]]; then
   export MESA_LOADER_DRIVER_OVERRIDE=zink
   export GALLIUM_DRIVER=zink
-  # Wayland ignores shrunk currentExtent (swapchain = window). Prefer X11 for FSR.
+  # Wayland-only binaries (glmark2-wayland, *-wayland) die if we clear WAYLAND_DISPLAY.
+  _cmd_base="$(basename -- "${1:-}" 2>/dev/null || true)"
+  if [[ "${XFSR_ZINK_WAYLAND:-}" != "1" && "${XFSR_ZINK_WAYLAND:-}" != "0" ]]; then
+    case "$_cmd_base" in
+      *-wayland|wayland*|*wayland*) export XFSR_ZINK_WAYLAND=1 ;;
+    esac
+  fi
+  unset _cmd_base
+  # Wayland ignores shrunk currentExtent (swapchain = window). Prefer X11 for FSR
+  # unless the app needs Wayland or XFSR_ZINK_WAYLAND=1.
   if [[ -n "${WAYLAND_DISPLAY:-}" && "${XFSR_ZINK_WAYLAND:-0}" != "1" ]]; then
     unset WAYLAND_DISPLAY WAYLAND_SOCKET
     echo "xfsr-run: Zink FSR prefers X11 — cleared WAYLAND_DISPLAY (XFSR_ZINK_WAYLAND=1 to keep)." >&2
+  elif [[ -n "${WAYLAND_DISPLAY:-}" && "${XFSR_ZINK_WAYLAND:-0}" == "1" ]]; then
+    echo "xfsr-run: keeping Wayland for Zink (XFSR_ZINK_WAYLAND=1)." >&2
   fi
   # Remap glViewport/glScissor from window size → render size (fixes lower-left corner).
   SHIM=""
@@ -469,6 +496,7 @@ XFSR_FSR=$XFSR_FSR
 XFSR_LAYER_FSR=${XFSR_LAYER_FSR:-}
 XFSR_PRESET=$XFSR_PRESET
 XFSR_OFFLOAD=$XFSR_OFFLOAD
+XFSR_IGPU_PRESENT=${XFSR_IGPU_PRESENT:-}
 XFSR_RCAS=$XFSR_RCAS
 XFSR_DISPLAY_EXTENT=${XFSR_DISPLAY_EXTENT:-}
 XFSR_OUTPUT_W=${XFSR_OUTPUT_W:-}

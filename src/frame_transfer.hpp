@@ -4,20 +4,27 @@
 #include "gpu_image.hpp"
 
 // Cross-device frame handoff.
-// Preferred path: one 4 KiB-aligned host allocation imported into BOTH devices via
-// VK_EXT_external_memory_host. dGPU DMA-writes, iGPU DMA-reads — CPU never touches pixels.
-// Fallback: HOST_CACHED linear images + memcpy (still much faster than WC/uncached).
+// Prefer: dma-buf fd export/import (VK_EXT_external_memory_dma_buf).
+// Then: one 4 KiB-aligned host allocation imported into BOTH devices via
+// VK_EXT_external_memory_host. Fallback: HOST_CACHED linear images + memcpy.
 //
-// Async 3-slot pipeline (shared-host):
+// Async 3-slot pipeline (dma-buf / shared-host):
 //   frame N   — download in flight
 //   frame N−1 — upload in flight
 //   frame N−2 — ready for FSR/present
+enum class TransferBackend : int {
+    Memcpy = 0,
+    SharedHost = 1,
+    DmaBuf = 2,
+};
+
 struct FrameTransfer {
     static constexpr int kSlots = 3;
 
     DeviceContext* srcCtx = nullptr;
     DeviceContext* dstCtx = nullptr;
-    bool useSharedHost = false;
+    TransferBackend backend = TransferBackend::Memcpy;
+    bool useSharedHost = false; // legacy alias: backend == SharedHost
     bool pipelined = true;
 
     struct Slot {
@@ -54,6 +61,11 @@ struct FrameTransfer {
                 uint32_t bpp = 4);
     void destroy();
     void resetPipeline();
+
+    bool usesGpuBuffer() const {
+        return backend == TransferBackend::DmaBuf || backend == TransferBackend::SharedHost;
+    }
+    static const char* backendName(TransferBackend b);
 
     const GpuImage& transferSync(const GpuImage& srcOptimal, double& outMemcpyMs,
                                  double& outTotalMs);

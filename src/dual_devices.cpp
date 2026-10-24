@@ -63,13 +63,22 @@ static void createLogicalDevice(DeviceContext& ctx, VkSurfaceKHR surface,
     if (!hasExtension(ctx.physical, VK_KHR_SWAPCHAIN_EXTENSION_NAME)) {
         throw std::runtime_error(std::string("Missing swapchain on ") + ctx.props.deviceName);
     }
-    // Zero-copy dGPU↔iGPU staging via one shared host allocation.
+    // Cross-GPU staging: prefer dma-buf, then shared host import, else memcpy.
     if (hasExtension(ctx.physical, VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME)) {
         exts.push_back(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
         ctx.extExternalMemoryHost = true;
     } else {
-        std::printf("WARN: %s missing VK_EXT_external_memory_host — falling back to memcpy\n",
+        std::printf("WARN: %s missing VK_EXT_external_memory_host — memcpy fallback if no dma-buf\n",
                     ctx.props.deviceName);
+    }
+    if (hasExtension(ctx.physical, VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME)) {
+        exts.push_back(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
+        ctx.extExternalMemoryFd = true;
+    }
+    if (ctx.extExternalMemoryFd &&
+        hasExtension(ctx.physical, VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME)) {
+        exts.push_back(VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME);
+        ctx.extDmaBuf = true;
     }
 
     VkPhysicalDeviceFeatures features{};
@@ -189,6 +198,9 @@ void DeviceContext::adopt(VkPhysicalDevice phys, VkDevice dev, uint32_t graphics
     vk.GetDeviceQueue(device, presentFamily, 0, &presentQueue);
     canPresent = true;
     extExternalMemoryHost = hasExtension(phys, VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
+    extExternalMemoryFd = hasExtension(phys, VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
+    extDmaBuf = extExternalMemoryFd &&
+                hasExtension(phys, VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME);
     if (extExternalMemoryHost) {
         VkPhysicalDeviceExternalMemoryHostPropertiesEXT hostProps{
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT};

@@ -86,21 +86,28 @@ static void remap_rect(GLint* x, GLint* y, GLsizei* w, GLsizei* h) {
         return;
 
     /* Zink's color image follows the caps-shrunk swapchain (render size) while
-     * GLFW still reports the window. Remap full-window viewports down so we
-     * fill that image (and keep MangoHud inside it). Skipping this left a
-     * corner crop that FSR then upscaled into a postage stamp. */
-    if (g_dw > 0 && g_dh > 0 && g_rw > 0 && g_rh > 0 && *w == g_dw && *h == g_dh && ox == 0 &&
-        oy == 0) {
+     * GLFW/GL still report the window. Remap full-window viewports down so we
+     * fill that image. Never blindly divide arbitrary sizes by XFSR_SCALE —
+     * that turned glmark2's 800x600 window into 320x240 inside an 800x600 FB
+     * (postage stamp) when DISPLAY_EXTENT was still 1080p. */
+    const int near = 2;
+    const int is_display =
+        (g_dw > 0 && g_dh > 0 && abs((int)*w - g_dw) <= near && abs((int)*h - g_dh) <= near);
+    const int is_glfw_fb =
+        (g_fb_w > 0 && g_fb_h > 0 && abs((int)*w - g_fb_w) <= near && abs((int)*h - g_fb_h) <= near);
+    if (g_rw > 0 && g_rh > 0 && ox == 0 && oy == 0 && (is_display || is_glfw_fb)) {
         if (x) *x = 0;
         if (y) *y = 0;
         *w = g_rw;
         *h = g_rh;
-    } else if (g_scale >= 1.01f && ox == 0 && oy == 0 && *w > 64 && *h > 64) {
-        const int tw = (int)(*w / g_scale + 0.5f);
-        const int th = (int)(*h / g_scale + 0.5f);
-        if (tw >= 64 && th >= 64 && (tw < *w || th < *h)) {
-            *w = tw;
-            *h = th;
+    } else if (g_rw > 0 && g_rh > 0 && g_scale >= 1.01f && ox == 0 && oy == 0 && *w > 64 &&
+               *h > 64) {
+        /* Viewport matches window≈scale*render (app ignored our env display hint). */
+        const int expect_w = (int)(g_rw * g_scale + 0.5f);
+        const int expect_h = (int)(g_rh * g_scale + 0.5f);
+        if (abs((int)*w - expect_w) <= 16 && abs((int)*h - expect_h) <= 16) {
+            *w = g_rw;
+            *h = g_rh;
         }
     }
 
