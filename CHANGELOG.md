@@ -5,6 +5,25 @@ All notable changes to **xfsr** / **xfsr-run** are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] — 2026-10-24
+
+### Added
+
+- OpenGL via Zink FSR (same-GPU and `--offload`) with `libxfsr_gl_shim.so`
+- `--preset ultra` (2.5× / 768×432 @ 1080p) for weak GPUs
+- Async Zink `--offload` round-trip (`transferPipeline` both ways)
+
+### Fixed
+
+- GL viewport corner crop: export shim symbols, wrap `glX`/`egl`/`glfw` GetProcAddress, interpose `dlsym` (glmark2)
+- Zink + NVIDIA `--offload` SIGSEGV (keep dGPU WSI; FSR on iGPU via host round-trip)
+- CI release: use Ubuntu 24.04 so `glslc` is available
+
+### Changed
+
+- Gate `[xfsr] presented N frames` on `XFSR_VERBOSE`
+- Layer prefers `XFSR_SCALE` from `xfsr-run` when set
+
 ## [0.1.0] — 2026-10-24
 
 ### Added
@@ -15,11 +34,6 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - Presets: quality / balanced / performance
 - `--no-rcas` (EASU-only) for higher FPS
 - Wayland display-extent hint (`--output` / `XFSR_DISPLAY_EXTENT`)
-- OpenGL/Zink FSR via `libxfsr_gl_shim.so` (viewport remap) — same-GPU and `--offload`
-  (Zink+`--offload`: dGPU WSI + iGPU FSR round-trip; avoids NVIDIA GLX crash on opaque iGPU WSI)
-- Fix GL shim: export interpose symbols + wrap `glX`/`egl`/`glfw` GetProcAddress
-  (hidden visibility had left `glViewport` out of the dynsym table → corner crop)
-- Fix GL shim: interpose `dlsym` so glmark2 (dlopen libGL) gets remapped viewports
 - `xfsr-bench.sh` / `xfsr_load_vk` / `xfsr_load_gl` uncapped load tools
 - One-line install script and GitHub Actions release packages
 
@@ -29,4 +43,5 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - Dual-GPU `SURFACE_LOST` / early `OUT_OF_DATE` (opaque app handle + iGPU-only window WSI)
 - Caps-shrink vs Zink EGL drawable mismatch
 
+[0.2.0]: https://github.com/jersobh/xfsr/releases/tag/v0.2.0
 [0.1.0]: https://github.com/jersobh/xfsr/releases/tag/v0.1.0

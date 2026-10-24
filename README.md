@@ -6,6 +6,8 @@
 
 FSR 1.0 for Linux games — wrap a title like `gamemoderun`, get more FPS by rendering lower and upscaling.
 
+**Current version:** [0.2.0](https://github.com/jersobh/xfsr/releases/tag/v0.2.0)
+
 ## What it does
 
 Games spend most of their time drawing each frame. **xfsr** asks the game to draw at a smaller resolution (for example 960×540 instead of 1920×1080), then upscales the image to your screen with **AMD FidelityFX FSR 1.0** so it still looks close to native.
@@ -30,6 +32,7 @@ Presets control how hard it pushes:
 | `quality` | 1.5× | 1280×720 → 1920×1080 |
 | `balanced` | 1.7× | ~1129×635 → 1920×1080 |
 | `performance` | 2.0× | 960×540 → 1920×1080 |
+| `ultra` | 2.5× | 768×432 → 1920×1080 |
 
 `--no-rcas` skips FSR’s sharpening pass (EASU upscale only) — often a bit more FPS, slightly softer image.
 
@@ -49,10 +52,10 @@ Installs into `~/.local` (`xfsr-run`, Vulkan layer, shaders). Put `~/.local/bin`
 xfsr-run --mangohud --preset performance --no-rcas %command%
 ```
 
-Optional iGPU offload:
+More FPS on weak GPUs: `--preset ultra`. Optional iGPU offload:
 
 ```text
-gamemoderun xfsr-run --offload --mangohud --preset performance --no-rcas %command%
+gamemoderun xfsr-run --offload --mangohud --preset ultra --no-rcas %command%
 ```
 
 ## Usage
@@ -64,7 +67,7 @@ xfsr-run --mangohud --preset performance --no-rcas vkcube
 
 | Flag | What it does |
 |------|----------------|
-| `--preset quality\|balanced\|performance` | How much to lower render resolution |
+| `--preset quality\|balanced\|performance\|ultra` | How much to lower render resolution (`ultra` = 2.5×) |
 | `--no-rcas` | Skip sharpening — usually more FPS |
 | `--offload` | Upscale/present on the iGPU (hybrid) |
 | `--mangohud` | FPS / frametime overlay |
@@ -73,7 +76,7 @@ xfsr-run --mangohud --preset performance --no-rcas vkcube
 
 ### OpenGL / Zink
 
-`xfsr-run` turns on **Zink** and preloads `libxfsr_gl_shim.so`, which remaps `glViewport` / `glScissor` from the window size down to the FSR render size (without that, you’d only see the lower-left corner). Same-GPU and `--offload` both work. With `--offload`, Zink keeps the window WSI on the dGPU (NVIDIA GLX can’t survive an iGPU-owned swapchain) and still runs FSR on the iGPU via a host round-trip. On Wayland, xfsr prefers X11/Xwayland for Zink FSR unless you set `XFSR_ZINK_WAYLAND=1`. `--no-zink` skips Zink (native GL never hits the layer).
+`xfsr-run` turns on **Zink** and preloads `libxfsr_gl_shim.so`, which remaps `glViewport` / `glScissor` from the window size down to the FSR render size (without that, you’d only see the lower-left corner). Same-GPU and `--offload` both work. With `--offload`, Zink keeps the window WSI on the dGPU (NVIDIA GLX can’t survive an iGPU-owned swapchain) and still runs FSR on the iGPU via an async host round-trip. On Wayland, xfsr prefers X11/Xwayland for Zink FSR unless you set `XFSR_ZINK_WAYLAND=1`. `--no-zink` skips Zink (native GL never hits the layer).
 
 ## Build from source
 
@@ -89,9 +92,13 @@ Needs CMake ≥ 3.20, C++17, `glslc`, Vulkan loader. FSR1 headers: `third_party/
 
 ## Versioning
 
-- [`VERSION`](VERSION) — semver  
-- [`CHANGELOG.md`](CHANGELOG.md)  
+- [`VERSION`](VERSION) — **0.2.0**
+- [`CHANGELOG.md`](CHANGELOG.md)
 - Tag `vX.Y.Z` → GitHub Actions builds the Linux package the install script downloads
+
+```sh
+git tag v0.2.0 && git push origin v0.2.0
+```
 
 ## Credits
 
