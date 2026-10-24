@@ -17,7 +17,8 @@ permissions:
 jobs:
   build-linux:
     name: Build Linux package
-    runs-on: ubuntu-22.04
+    # 24.04 ships `glslc`; 22.04 does not (only via LunarG third-party repo).
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4
