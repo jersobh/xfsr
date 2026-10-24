@@ -73,6 +73,30 @@ static void load_extents(void) {
     }
 }
 
+/* Map a window/fb size to the Zink color-image (render) size.
+ * Fullscreen matching XFSR_OUTPUT_* → absolute XFSR_RENDER_*.
+ * Windowed (glmark2 800x600) → window/scale — never force 1080p's 768x432. */
+static void target_render_size(int win_w, int win_h, int* out_rw, int* out_rh) {
+    *out_rw = 0;
+    *out_rh = 0;
+    if (win_w < 64 || win_h < 64) return;
+    const int near = 2;
+    if (g_dw > 0 && g_dh > 0 && g_rw > 0 && g_rh > 0 && abs(win_w - g_dw) <= near &&
+        abs(win_h - g_dh) <= near) {
+        *out_rw = g_rw;
+        *out_rh = g_rh;
+        return;
+    }
+    if (g_scale >= 1.01f) {
+        int rw = (int)(win_w / g_scale + 0.5f);
+        int rh = (int)(win_h / g_scale + 0.5f);
+        if (rw < 64) rw = 64;
+        if (rh < 64) rh = 64;
+        *out_rw = rw;
+        *out_rh = rh;
+    }
+}
+
 static void remap_rect(GLint* x, GLint* y, GLsizei* w, GLsizei* h) {
     load_extents();
     if (!w || !h) return;
@@ -80,41 +104,35 @@ static void remap_rect(GLint* x, GLint* y, GLsizei* w, GLsizei* h) {
     const GLint oy = y ? *y : 0;
     const GLsizei ow = *w, oh = *h;
 
-    /* Already at render size — never shrink twice (640→320 with scale=2). */
-    if (g_rw > 0 && g_rh > 0 && *w >= g_rw - 1 && *w <= g_rw + 1 && *h >= g_rh - 1 &&
-        *h <= g_rh + 1)
-        return;
+    if (ox != 0 || oy != 0 || *w <= 64 || *h <= 64) return;
 
-    /* Zink's color image follows the caps-shrunk swapchain (render size) while
-     * GLFW/GL still report the window. Remap full-window viewports down so we
-     * fill that image. Never blindly divide arbitrary sizes by XFSR_SCALE —
-     * that turned glmark2's 800x600 window into 320x240 inside an 800x600 FB
-     * (postage stamp) when DISPLAY_EXTENT was still 1080p. */
+    int tw = 0, th = 0;
+    /* Prefer real window pixels as the source size for scaling. */
+    const int win_w = (g_fb_w > 64) ? g_fb_w : (int)*w;
+    const int win_h = (g_fb_h > 64) ? g_fb_h : (int)*h;
+    target_render_size(win_w, win_h, &tw, &th);
+    if (tw <= 0 || th <= 0) return;
+
+    /* Already at target render size — never shrink twice. */
+    if (abs((int)*w - tw) <= 1 && abs((int)*h - th) <= 1) return;
+
+    /* Only remap full-window viewports (matches window or display hint). */
     const int near = 2;
+    const int is_window =
+        (abs((int)*w - win_w) <= near && abs((int)*h - win_h) <= near);
     const int is_display =
         (g_dw > 0 && g_dh > 0 && abs((int)*w - g_dw) <= near && abs((int)*h - g_dh) <= near);
-    const int is_glfw_fb =
-        (g_fb_w > 0 && g_fb_h > 0 && abs((int)*w - g_fb_w) <= near && abs((int)*h - g_fb_h) <= near);
-    if (g_rw > 0 && g_rh > 0 && ox == 0 && oy == 0 && (is_display || is_glfw_fb)) {
-        if (x) *x = 0;
-        if (y) *y = 0;
-        *w = g_rw;
-        *h = g_rh;
-    } else if (g_rw > 0 && g_rh > 0 && g_scale >= 1.01f && ox == 0 && oy == 0 && *w > 64 &&
-               *h > 64) {
-        /* Viewport matches window≈scale*render (app ignored our env display hint). */
-        const int expect_w = (int)(g_rw * g_scale + 0.5f);
-        const int expect_h = (int)(g_rh * g_scale + 0.5f);
-        if (abs((int)*w - expect_w) <= 16 && abs((int)*h - expect_h) <= 16) {
-            *w = g_rw;
-            *h = g_rh;
-        }
-    }
+    if (!is_window && !is_display) return;
+
+    if (x) *x = 0;
+    if (y) *y = 0;
+    *w = tw;
+    *h = th;
 
     if (!g_logged && (*w != ow || *h != oh) && getenv("XFSR_VERBOSE")) {
         g_logged = 1;
-        fprintf(stderr, "[xfsr-gl] remap %dx%d → %dx%d (glfw_fb=%dx%d)\n", (int)ow, (int)oh,
-                (int)*w, (int)*h, g_fb_w, g_fb_h);
+        fprintf(stderr, "[xfsr-gl] remap %dx%d → %dx%d (glfw_fb=%dx%d win=%dx%d)\n", (int)ow,
+                (int)oh, (int)*w, (int)*h, g_fb_w, g_fb_h, win_w, win_h);
     }
 }
 
@@ -276,12 +294,13 @@ XFSR_EXPORT void glfwGetFramebufferSize(void* window, int* width, int* height) {
     g_fb_w = *width;
     g_fb_h = *height;
     load_extents();
-    /* Report render size when the window is at display size so the app's
-     * glViewport matches Zink's caps-shrunk color image (and MangoHud). */
-    if (g_dw > 0 && g_dh > 0 && g_rw > 0 && g_rh > 0 && *width >= g_dw - 1 &&
-        *width <= g_dw + 1 && *height >= g_dh - 1 && *height <= g_dh + 1) {
-        *width = g_rw;
-        *height = g_rh;
+    /* Lie render size so the app's glViewport matches Zink's caps-shrunk image.
+     * Uses window/scale for windowed glmark2 — not the 1080p XFSR_RENDER_* hint. */
+    int tw = 0, th = 0;
+    target_render_size(*width, *height, &tw, &th);
+    if (tw > 0 && th > 0 && (tw != *width || th != *height)) {
+        *width = tw;
+        *height = th;
     }
 }
 
