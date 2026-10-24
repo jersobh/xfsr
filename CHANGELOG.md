@@ -18,11 +18,16 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - GL viewport corner crop: export shim symbols, wrap `glX`/`egl`/`glfw` GetProcAddress, interpose `dlsym` (glmark2)
 - Zink + NVIDIA `--offload` SIGSEGV (keep dGPU WSI; FSR on iGPU via host round-trip)
 - CI release: use Ubuntu 24.04 so `glslc` is available
+- Steam Vulkan/Proton titles (CS2, DXVK): Zink no longer on by default (was clearing
+  `WAYLAND_DISPLAY` and forcing `GALLIUM_DRIVER=zink`)
+- CS2 stuck on logo: stop caps-shrinking native Vulkan (recreate storm); skip
+  `QueueWaitIdle` on swapchain destroy; don’t inherit ambient `XFSR_OUTPUT_*`
 
 ### Changed
 
 - Gate `[xfsr] presented N frames` on `XFSR_VERBOSE`
 - Layer prefers `XFSR_SCALE` from `xfsr-run` when set
+- `xfsr-run`: `--zink` is opt-in; Vulkan/Proton use the layer with no Zink env
 
 ## [0.1.0] — 2026-10-24
 

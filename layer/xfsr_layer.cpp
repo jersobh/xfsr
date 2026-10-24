@@ -405,10 +405,9 @@ void destroyProxy(ProxySwapchain* ps) {
     if (!ps) return;
     DeviceData* dd = ps->dev;
     if (ps->pipelineReady) {
-        // Avoid FsrPass::destroy → DeviceWaitIdle on every swapchain recreate (CS2 was
-        // getting SUBOPTIMAL each frame → recreate → waitIdle ≈ single-digit FPS).
-        if (dd && dd->dgpuReady && dd->QueueWaitIdle && dd->graphicsQueue)
-            dd->QueueWaitIdle(dd->graphicsQueue);
+        // Do NOT QueueWaitIdle here — CS2 recreates the swapchain often; a full idle
+        // per destroy pinned the logo screen at single-digit FPS. Fences in the present
+        // ring + ICD oldSwapchain retirement are enough for in-flight work.
         ps->fsr.destroy();
         ps->pipelineReady = false;
     }
@@ -416,14 +415,6 @@ void destroyProxy(ProxySwapchain* ps) {
     ps->appImages.clear();
     if (dd) {
         DeviceContext& presentCtx = presentsOnIgpu(ps) ? dd->igpu : dd->dgpu;
-        if (ps->offloadIgpu && dd->igpuReady) {
-            if (dd->igpu.graphicsQueue) {
-                dd->igpu.loadDispatch();
-                if (dd->igpu.vk.QueueWaitIdle) dd->igpu.vk.QueueWaitIdle(dd->igpu.graphicsQueue);
-            }
-        }
-        if (dd->QueueWaitIdle && dd->graphicsQueue) dd->QueueWaitIdle(dd->graphicsQueue);
-
         destroyPresentRing(ps, presentCtx);
         if (ps->realSwapchain) {
             WsiFns wsi = wsiFnsFor(dd, presentsOnIgpu(ps));
@@ -919,27 +910,29 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_GetPhysicalDeviceSurfaceCapabilitiesKHR(
         id->GetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, pSurfaceCapabilities);
     if (r != VK_SUCCESS || !fsrEnabled() || g_bypassCapsShrink > 0) return r;
 
-    // Native Vulkan: shrink only on discrete. Zink: shrink on whatever GPU Mesa picked —
-    // libxfsr_gl_shim.so remaps glViewport/glScissor from window → render size.
-    if (id->GetPhysicalDeviceProperties) {
-        VkPhysicalDeviceProperties props{};
-        id->GetPhysicalDeviceProperties(physicalDevice, &props);
-        const bool discrete = props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
-        if (!discrete && !zinkActive()) return r;
-    }
-
     const uint32_t cw = pSurfaceCapabilities->currentExtent.width;
     const uint32_t ch = pSurfaceCapabilities->currentExtent.height;
-    // Remember true window size before we rewrite currentExtent.
+    // Remember true window size (needed by CreateSwapchain force-scale / present WSI).
     if (cw != 0xFFFFFFFFu && ch != 0xFFFFFFFFu && cw > 0 && ch > 0) {
         id->realW = cw;
         id->realH = ch;
     }
 
-    // Concrete currentExtent (X11 / some Wayland ICDs): shrink and remember window size.
-    // Wayland UINT_MAX: once we know the window (from a prior CreateSwapchain), replace
-    // UINT_MAX with the shrunk size so apps that prefer currentExtent pick render res.
-    // Never use maxImageExtent as the window — it is a driver ceiling.
+    // Caps-shrink ONLY for Zink. Native Vulkan / DXVK / CS2 create at the real window
+    // size; if we advertise currentExtent=render, Source2 treats it as a resize every
+    // frame → swapchain recreate storm + QueueWaitIdle → stuck on the logo at ~FPS.
+    // Those titles get FSR via force-scale in CreateSwapchain instead.
+    if (!zinkActive()) return r;
+
+    if (id->GetPhysicalDeviceProperties) {
+        VkPhysicalDeviceProperties props{};
+        id->GetPhysicalDeviceProperties(physicalDevice, &props);
+        const bool discrete = props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+        if (!discrete) return r;
+    }
+
+    // Zink: shrink currentExtent so the GL drawable matches render size; shim remaps
+    // glViewport. Wayland UINT_MAX: once we know the window, replace with shrunk size.
     uint32_t winW = 0, winH = 0;
     if (cw != 0xFFFFFFFFu && ch != 0xFFFFFFFFu && cw > 0 && ch > 0) {
         winW = cw;
@@ -957,7 +950,6 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_GetPhysicalDeviceSurfaceCapabilitiesKHR(
         pSurfaceCapabilities->minImageExtent = {
             std::min(rw, pSurfaceCapabilities->minImageExtent.width),
             std::min(rh, pSurfaceCapabilities->minImageExtent.height)};
-        // Report window as max (clamped to driver) — never render size (postage-stamp).
         pSurfaceCapabilities->maxImageExtent = {
             drvMaxW ? std::min(winW, drvMaxW) : winW,
             drvMaxH ? std::min(winH, drvMaxH) : winH};
@@ -968,8 +960,8 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_GetPhysicalDeviceSurfaceCapabilitiesKHR(
             id->lastLogCh = winH;
             id->lastLogRw = rw;
             id->lastLogRh = rh;
-            logv("[xfsr] caps shrink current %ux%u → %ux%u (max stays %ux%u)\n", winW, winH, rw, rh,
-                 winW, winH);
+            logv("[xfsr] caps shrink (zink) current %ux%u → %ux%u (max stays %ux%u)\n", winW, winH,
+                 rw, rh, winW, winH);
         }
     }
     return r;

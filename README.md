@@ -46,16 +46,29 @@ Installs into `~/.local` (`xfsr-run`, Vulkan layer, shaders). Put `~/.local/bin`
 
 ## Steam
 
-**Launch Options:**
+**Default (Vulkan / Proton / DXVK)** — CS2, Mega Man 11, most Steam titles:
 
 ```text
 xfsr-run --mangohud --preset performance --no-rcas %command%
 ```
 
-More FPS on weak GPUs: `--preset ultra`. Optional iGPU offload:
+Do **not** add `--zink` or `--offload` for these. `--zink` forces Mesa GL→Vulkan and clears Wayland (breaks native Vulkan games). `--offload` has crashed CS2 on hybrid NVIDIA+AMD.
+
+You should see `xfsr-run: layer …` then later `[xfsr] force-scale` / `proxy ready` in the Steam console. If Mega Man / Proton never prints `[xfsr]`, the layer didn’t load inside the runtime — fully quit Steam, clear leftover `XFSR_*` / `GALLIUM_*` env, relaunch Steam, and retry.
+
+If CS2 sticks on the Valve logo, update the layer (`curl … install.sh | sh` or rebuild), use the launch line above (no `ultra` until the installed `xfsr-run` supports it), and clear leftover test env before starting Steam:
+
+```fish
+set -e GALLIUM_DRIVER MESA_LOADER_DRIVER_OVERRIDE ENABLE_XFSR
+set -e XFSR_OUTPUT_W XFSR_OUTPUT_H XFSR_DISPLAY_EXTENT XFSR_OFFLOAD XFSR_VERBOSE
+```
+
+More FPS: `--preset ultra`. Confirm the layer is live with `XFSR_VERBOSE=1` (look for `proxy ready` / `force-scale` / `first present ok`).
+
+**OpenGL only** (glmark2, native GL games):
 
 ```text
-gamemoderun xfsr-run --offload --mangohud --preset ultra --no-rcas %command%
+xfsr-run --zink --mangohud --preset performance --no-rcas %command%
 ```
 
 ## Usage
@@ -63,20 +76,21 @@ gamemoderun xfsr-run --offload --mangohud --preset ultra --no-rcas %command%
 ```sh
 xfsr-run --help
 xfsr-run --mangohud --preset performance --no-rcas vkcube
+xfsr-run --zink --preset performance --no-rcas glmark2
 ```
 
 | Flag | What it does |
 |------|----------------|
 | `--preset quality\|balanced\|performance\|ultra` | How much to lower render resolution (`ultra` = 2.5×) |
 | `--no-rcas` | Skip sharpening — usually more FPS |
-| `--offload` | Upscale/present on the iGPU (hybrid) |
+| `--offload` | Upscale on the iGPU (hybrid; skip for CS2) |
 | `--mangohud` | FPS / frametime overlay |
-| `--no-zink` | Don’t force Zink (Vulkan-only titles) |
+| `--zink` | OpenGL via Zink + viewport shim (off by default) |
 | `--print` | Show the env xfsr would set, then exit |
 
 ### OpenGL / Zink
 
-`xfsr-run` turns on **Zink** and preloads `libxfsr_gl_shim.so`, which remaps `glViewport` / `glScissor` from the window size down to the FSR render size (without that, you’d only see the lower-left corner). Same-GPU and `--offload` both work. With `--offload`, Zink keeps the window WSI on the dGPU (NVIDIA GLX can’t survive an iGPU-owned swapchain) and still runs FSR on the iGPU via an async host round-trip. On Wayland, xfsr prefers X11/Xwayland for Zink FSR unless you set `XFSR_ZINK_WAYLAND=1`. `--no-zink` skips Zink (native GL never hits the layer).
+Pass **`--zink`** so `xfsr-run` sets Mesa Zink and preloads `libxfsr_gl_shim.so` (remaps `glViewport` / `glScissor`). Without `--zink`, native GL never hits the Vulkan layer. With `--offload`, Zink keeps the window WSI on the dGPU and runs FSR on the iGPU via an async host round-trip. On Wayland, `--zink` prefers X11/Xwayland unless `XFSR_ZINK_WAYLAND=1`.
 
 ## Build from source
 

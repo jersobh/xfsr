@@ -8,15 +8,27 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")")/.." && pwd)"
-BUILD="${XFSR_BUILD:-$ROOT/build}"
+# Prefer an explicit XFSR_BUILD only if it actually contains the layer; otherwise
+# a stale export from testing points Proton at a host path pressure-vessel cannot see.
+BUILD=""
+if [[ -n "${XFSR_BUILD:-}" && -f "${XFSR_BUILD}/VkLayer_XFSR.json" ]]; then
+  BUILD="$XFSR_BUILD"
+else
+  BUILD="$ROOT/build"
+fi
 LAYER_DIR=""
 PRINT_ONLY=0
-USE_ZINK=1
+# Default OFF: Vulkan / Proton / DXVK titles (CS2, most Steam games) must not get
+# GALLIUM_DRIVER=zink or WAYLAND_DISPLAY cleared. Opt in with --zink for native GL.
+USE_ZINK=0
 USE_NESTED=0
 USE_MANGOHUD=0
 PREFER_DGPU=1
-OUT_W="${XFSR_OUTPUT_W:-1920}"
-OUT_H="${XFSR_OUTPUT_H:-1080}"
+# Do NOT inherit ambient XFSR_OUTPUT_* / DISPLAY_EXTENT — glmark2 tests leave
+# 800x600 in the session and Steam then force-scales CS2 to a postage stamp.
+OUT_W=1920
+OUT_H=1080
+OUT_CLI=0
 PRESET="${XFSR_PRESET:-${CROSSVULKAN_PRESET_MODE:-quality}}"
 FSR="${XFSR_FSR:-${CROSSVULKAN_FSR:-1}}"
 # Default same-GPU FSR. Do NOT inherit ambient XFSR_OFFLOAD — Steam/sessions
@@ -28,6 +40,9 @@ RCAS="${XFSR_RCAS:-${CROSSVULKAN_RCAS:-1}}"
 if [[ "${XFSR_MANGOHUD:-0}" == "1" ]]; then
   USE_MANGOHUD=1
 fi
+if [[ "${XFSR_ZINK:-0}" == "1" ]]; then
+  USE_ZINK=1
+fi
 
 usage() {
   cat <<'EOF'
@@ -38,10 +53,11 @@ Options:
                                           ultra = 2.5× (weak GPUs / max FPS)
   --fsr 0|1                               native / FSR1 (default: 1; FSR3 demo-only; FSR4 not yet)
   --offload / --no-offload                dual-GPU iGPU present (off by default —
-                                          same-GPU FSR is usually faster for games)
+                                          same-GPU FSR is usually faster for games;
+                                          --offload can crash CS2 / some Proton titles)
   --rcas / --no-rcas                      FSR1 sharpening pass (default: on; --no-rcas = EASU only)
-  --zink / --no-zink                      Zink for OpenGL (default: on — leave on
-                                          unless you know the title is Vulkan-only)
+  --zink / --no-zink                      Force Mesa Zink for OpenGL FSR (default: off —
+                                          leave off for Vulkan / Proton / CS2)
   --mangohud / --hud                      Wrap with MangoHud for FPS/frametime
   --igpu                                  Prefer iGPU ICD (default: prefer dGPU)
   --layer-dir DIR                         directory with VkLayer_XFSR.json
@@ -50,10 +66,10 @@ Options:
 
   --nested / --gamescope                  Deprecated (second compositor; not dual-GPU FSR)
 
-Env: XFSR_*, XFSR_VERBOSE=1, XFSR_MANGOHUD=1
+Env: XFSR_*, XFSR_VERBOSE=1, XFSR_MANGOHUD=1, XFSR_ZINK=1
 
-Steam:  xfsr-run --mangohud --preset performance %command%
-Smoke:  ./scripts/xfsr-demo.sh
+Steam (Vulkan/Proton):  xfsr-run --mangohud --preset performance --no-rcas %command%
+OpenGL:                 xfsr-run --zink --preset performance --no-rcas glmark2
 EOF
 }
 
@@ -77,9 +93,9 @@ while [[ $# -gt 0 ]]; do
     --no-mangohud|--no-hud) USE_MANGOHUD=0; shift ;;
     --igpu) PREFER_DGPU=0; shift ;;
     --output)
-      OUT_W="${2%%x*}"; OUT_H="${2##*x}"; shift 2 ;;
+      OUT_W="${2%%x*}"; OUT_H="${2##*x}"; OUT_CLI=1; shift 2 ;;
     --output=*)
-      o="${1#*=}"; OUT_W="${o%%x*}"; OUT_H="${o##*x}"; shift ;;
+      o="${1#*=}"; OUT_W="${o%%x*}"; OUT_H="${o##*x}"; OUT_CLI=1; shift ;;
     --preset)
       PRESET="${2:?}"; shift 2 ;;
     --preset=*) PRESET="${1#*=}"; shift ;;
@@ -122,12 +138,13 @@ if [[ $# -eq 0 && $PRINT_ONLY -eq 0 ]]; then
 fi
 
 find_layer_dir() {
-  # Prefer the build tree when developing so a stale ~/.local install cannot win.
+  # Installed ~/.local first for Steam/Proton (pressure-vessel sees $HOME).
+  # Dev build next so local iteration still works outside Steam.
   local candidates=(
     "${LAYER_DIR}"
     "${XFSR_LAYER_PATH:-}"
-    "${BUILD}"
     "${HOME}/.local/share/vulkan/implicit_layer.d"
+    "${BUILD}"
     "/usr/share/vulkan/implicit_layer.d"
   )
   local d
@@ -231,7 +248,15 @@ if [[ -z "${XFSR_SHADER_DIR:-}" ]]; then
   done
 fi
 
-export VK_ADD_IMPLICIT_LAYER_PATH="${LAYER_DIR}${VK_ADD_IMPLICIT_LAYER_PATH:+:$VK_ADD_IMPLICIT_LAYER_PATH}"
+# Replace ambient VK_ADD_IMPLICIT_LAYER_PATH (stale project build/ dirs break Proton).
+export VK_ADD_IMPLICIT_LAYER_PATH="${LAYER_DIR}"
+# Pressure-vessel imports ~/.local/share vulkan layers via XDG_DATA_DIRS; ensure
+# both the share prefix and the .so directory are visible inside the container.
+export XDG_DATA_DIRS="${HOME}/.local/share${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}"
+_pv_rw="${HOME}/.local"
+[[ -n "${XFSR_SHADER_DIR:-}" ]] && _pv_rw="${_pv_rw}:${XFSR_SHADER_DIR}"
+export PRESSURE_VESSEL_FILESYSTEMS_RW="${_pv_rw}${PRESSURE_VESSEL_FILESYSTEMS_RW:+:$PRESSURE_VESSEL_FILESYSTEMS_RW}"
+unset _pv_rw
 export ENABLE_XFSR=1
 unset DISABLE_XFSR 2>/dev/null || true
 export XFSR_FSR="$FSR"
@@ -253,17 +278,19 @@ if [[ -z "${XFSR_LAYER_FSR:-}" ]]; then
   export XFSR_LAYER_FSR="$FSR"
 fi
 
+echo "xfsr-run: layer ${LAYER_DIR} (ENABLE_XFSR=1 preset=$PRESET scale=$SCALE offload=$OFFLOAD)" >&2
+
 if [[ $USE_ZINK -eq 1 ]]; then
   export MESA_LOADER_DRIVER_OVERRIDE=zink
   export GALLIUM_DRIVER=zink
   # Wayland ignores shrunk currentExtent (swapchain = window). Prefer X11 for FSR.
   if [[ -n "${WAYLAND_DISPLAY:-}" && "${XFSR_ZINK_WAYLAND:-0}" != "1" ]]; then
     unset WAYLAND_DISPLAY WAYLAND_SOCKET
-    echo "xfsr-run: Zink FSR prefers X11 — unset WAYLAND_DISPLAY (XFSR_ZINK_WAYLAND=1 to keep Wayland)." >&2
+    echo "xfsr-run: Zink FSR prefers X11 — cleared WAYLAND_DISPLAY (XFSR_ZINK_WAYLAND=1 to keep)." >&2
   fi
   # Remap glViewport/glScissor from window size → render size (fixes lower-left corner).
   SHIM=""
-  for d in "$BUILD" "$ROOT/lib" "${HOME}/.local/lib" "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/../lib"; do
+  for d in "${HOME}/.local/lib" "$BUILD" "$ROOT/lib" "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/../lib"; do
     if [[ -f "$d/libxfsr_gl_shim.so" ]]; then
       SHIM="$d/libxfsr_gl_shim.so"
       break
@@ -276,21 +303,19 @@ if [[ $USE_ZINK -eq 1 ]]; then
     echo "xfsr-run: warning: libxfsr_gl_shim.so not found — OpenGL may show a corner crop. Build/install xfsr." >&2
   fi
 else
-  echo "xfsr-run: --no-zink — native OpenGL bypasses the Vulkan layer (no FSR)." >&2
+  # Clear ambient Zink (shell/Steam often keep GALLIUM_DRIVER=zink from testing).
+  # Leaving it set breaks native Vulkan (CS2) and Proton/DXVK.
+  unset MESA_LOADER_DRIVER_OVERRIDE GALLIUM_DRIVER 2>/dev/null || true
+  # Do NOT set DRI_PRIME=1 — on NVIDIA+AMD hybrids it forces the iGPU / breaks Proton.
+  unset DRI_PRIME 2>/dev/null || true
+  echo "xfsr-run: Vulkan/Proton path (no Zink). OpenGL titles need --zink for FSR." >&2
 fi
 
 # Dual-GPU: keep both ICDs visible (do not set VK_ICD_FILENAMES to one GPU).
-# Prefer discrete via Mesa device-select. Do NOT set DRI_PRIME=1 with Zink —
-# on this hybrid (NVIDIA+AMD) DRI_PRIME=1 forces the Vega iGPU and overrides
-# MESA_VK_DEVICE_SELECT, so the layer never sees a discrete device.
+# Prefer discrete via Mesa device-select when available (RADV/AMDVLK). NVIDIA ICD
+# ignores MESA_VK_DEVICE_SELECT; unset FORCE so both GPUs stay enumerable for --offload.
 if [[ $PREFER_DGPU -eq 1 ]]; then
-  if [[ $USE_ZINK -eq 0 ]]; then
-    # Native GL only: PRIME offload hint (unused when --zink).
-    export DRI_PRIME="${DRI_PRIME:-1}"
-  fi
   if [[ -z "${MESA_VK_DEVICE_SELECT:-}" ]] && command -v vulkaninfo >/dev/null 2>&1; then
-    # Probe without our layer so the device-select list stays parseable.
-    # Example line: GPU 0: 10de:1f91 "NVIDIA …" discrete GPU 0000:01:00.0
     dgpu_id="$(
       env -u ENABLE_XFSR -u VK_ADD_IMPLICIT_LAYER_PATH -u VK_LAYER_PATH \
         MESA_VK_DEVICE_SELECT=list vulkaninfo --summary 2>&1 \
@@ -298,10 +323,6 @@ if [[ $PREFER_DGPU -eq 1 ]]; then
             print substr($0, RSTART, RLENGTH); exit } }' || true
     )"
     if [[ -n "$dgpu_id" ]]; then
-      # Prefer discrete for the app, but do NOT set FORCE_DEFAULT_DEVICE —
-      # that filters EnumeratePhysicalDevices to a single GPU and blocks the
-      # iGPU companion. MESA_VK_DEVICE_SELECT alone still prefers the dGPU
-      # while leaving both physical devices visible to the layer.
       export MESA_VK_DEVICE_SELECT="$dgpu_id"
       unset MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE 2>/dev/null || true
     fi
