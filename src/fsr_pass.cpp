@@ -286,6 +286,11 @@ void FsrPass::record(VkCommandBuffer cmd, const GpuImage& src, VkImageView direc
     // Only swizzle the pass that writes the swapchain; intermediates stay RGBA.
     swizzleBgra = false;
 
+    // Layer present path never goes through DeviceContext::resetAndBegin — without a
+    // reset, the second CmdWriteTimestamp on the same query index DEVICE_LOSTs NVIDIA.
+    if (ctx->timestampPool && d.CmdResetQueryPool)
+        d.CmdResetQueryPool(cmd, ctx->timestampPool, 0, 8);
+
     d.CmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, ctx->timestampPool, 2);
 
     const bool easuDirect = directFinal && !enableRcas;

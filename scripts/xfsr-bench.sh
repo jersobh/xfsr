@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Benchmark xfsr-run modes with uncapped load apps (not vkcube@60).
+# Every case runs with MangoHud (overlay + frametime) for visual/FPS parity.
 #
 # Usage:
-#   ./scripts/xfsr-bench.sh              # 8s each, complexity 64
+#   ./scripts/xfsr-bench.sh              # 6s each, complexity 128
 #   ./scripts/xfsr-bench.sh 12 96        # seconds, complexity
 #   XFSR_BENCH_VK_ONLY=1 ./scripts/xfsr-bench.sh
+#   XFSR_BENCH_NO_MANGOHUD=1 ./scripts/xfsr-bench.sh   # opt out
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -19,13 +21,31 @@ WIN_H="${XFSR_BENCH_H:-1080}"
 VK_BIN="$BUILD/xfsr_load_vk"
 GL_BIN="$BUILD/xfsr_load_gl"
 
-if [[ ! -x "$VK_BIN" ]]; then
+USE_MANGOHUD=1
+if [[ "${XFSR_BENCH_NO_MANGOHUD:-0}" == "1" ]]; then
+  USE_MANGOHUD=0
+fi
+
+if [[ ! -x "$VK_BIN" ]] || [[ ! -x "$GL_BIN" ]]; then
   echo "xfsr-bench: building load apps..."
-  cmake -S "$ROOT" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release
-  cmake --build "$BUILD" -j --target xfsr_load_vk xfsr_load_gl VkLayer_XFSR
+  cmake -S "$ROOT" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release -DXFSR_BUILD_BENCH=ON
+  cmake --build "$BUILD" -j --target xfsr_load_vk xfsr_load_gl VkLayer_XFSR xfsr_gl_shim
+fi
+
+if [[ $USE_MANGOHUD -eq 1 ]]; then
+  if ! command -v mangohud >/dev/null 2>&1 && [[ ! -e /usr/lib/mangohud/libMangoHud.so ]]; then
+    echo "xfsr-bench: mangohud not found (install mangohud, or XFSR_BENCH_NO_MANGOHUD=1)" >&2
+    exit 1
+  fi
 fi
 
 ARGS=(--seconds "$SECONDS_N" --complexity "$COMPLEXITY" --width "$WIN_W" --height "$WIN_H")
+
+# Prefix for baseline apps (no xfsr-run). Empty when HUD disabled.
+MH_BASE=()
+if [[ $USE_MANGOHUD -eq 1 ]]; then
+  MH_BASE=(mangohud)
+fi
 
 run_case() {
   local name="$1"
@@ -51,26 +71,35 @@ run_case() {
 
 RESULTS=()
 
-echo "xfsr-bench: ${SECONDS_N}s  complexity=${COMPLEXITY}  ${WIN_W}x${WIN_H}"
+echo "xfsr-bench: ${SECONDS_N}s  complexity=${COMPLEXITY}  ${WIN_W}x${WIN_H}  mangohud=$USE_MANGOHUD"
 echo "Binaries: $VK_BIN / $GL_BIN"
 
 OUT=(--output "${WIN_W}x${WIN_H}")
+# Always pass --mangohud into xfsr-run when enabled (also sets XFSR_MANGOHUD).
+MH=()
+if [[ $USE_MANGOHUD -eq 1 ]]; then
+  MH=(--mangohud)
+fi
 
 # --- Vulkan ---
 run_case "vk baseline (no layer)" env -u ENABLE_XFSR -u VK_ADD_IMPLICIT_LAYER_PATH \
-  -u XFSR_DISPLAY_EXTENT -u XFSR_OUTPUT_W -u XFSR_OUTPUT_H "$VK_BIN"
-run_case "vk xfsr same-GPU quality" "$XFSR" "${OUT[@]}" --no-zink --preset quality -- "$VK_BIN"
-run_case "vk xfsr same-GPU performance" "$XFSR" "${OUT[@]}" --no-zink --preset performance -- "$VK_BIN"
-run_case "vk xfsr performance --no-rcas" "$XFSR" "${OUT[@]}" --no-zink --preset performance --no-rcas -- "$VK_BIN"
-run_case "vk xfsr performance --offload" "$XFSR" "${OUT[@]}" --no-zink --preset performance --offload -- "$VK_BIN"
+  -u XFSR_DISPLAY_EXTENT -u XFSR_OUTPUT_W -u XFSR_OUTPUT_H "${MH_BASE[@]}" "$VK_BIN"
+run_case "vk xfsr same-GPU quality" "$XFSR" "${OUT[@]}" "${MH[@]}" --no-zink --preset quality -- "$VK_BIN"
+run_case "vk xfsr same-GPU performance" "$XFSR" "${OUT[@]}" "${MH[@]}" --no-zink --preset performance -- "$VK_BIN"
+run_case "vk xfsr performance --no-rcas" "$XFSR" "${OUT[@]}" "${MH[@]}" --no-zink --preset performance --no-rcas -- "$VK_BIN"
+run_case "vk xfsr performance --offload" "$XFSR" "${OUT[@]}" "${MH[@]}" --no-zink --preset performance --offload -- "$VK_BIN"
 
 # --- OpenGL → Zink → layer ---
+# Always pass --zink for GL load app (auto-detect also knows xfsr_load_gl).
+# Without Zink, caps-shrink + viewport shim paints a postage-stamp in the window.
 if [[ "${XFSR_BENCH_VK_ONLY:-0}" != "1" && -x "$GL_BIN" ]]; then
-  run_case "gl baseline (native GL)" env -u ENABLE_XFSR -u MESA_LOADER_DRIVER_OVERRIDE -u GALLIUM_DRIVER \
-    -u XFSR_DISPLAY_EXTENT -u XFSR_OUTPUT_W -u XFSR_OUTPUT_H "$GL_BIN"
-  run_case "gl zink+xfsr performance" "$XFSR" "${OUT[@]}" --preset performance -- "$GL_BIN"
-  run_case "gl zink+xfsr performance --no-rcas" "$XFSR" "${OUT[@]}" --preset performance --no-rcas -- "$GL_BIN"
-  run_case "gl zink+xfsr performance --offload" "$XFSR" "${OUT[@]}" --preset performance --offload -- "$GL_BIN"
+  run_case "gl baseline (native GL)" env -u ENABLE_XFSR -u VK_ADD_IMPLICIT_LAYER_PATH \
+    -u MESA_LOADER_DRIVER_OVERRIDE -u GALLIUM_DRIVER -u LD_PRELOAD \
+    -u XFSR_DISPLAY_EXTENT -u XFSR_OUTPUT_W -u XFSR_OUTPUT_H -u XFSR_SCALE \
+    "${MH_BASE[@]}" "$GL_BIN"
+  run_case "gl zink+xfsr performance" "$XFSR" "${OUT[@]}" "${MH[@]}" --zink --preset performance -- "$GL_BIN"
+  run_case "gl zink+xfsr performance --no-rcas" "$XFSR" "${OUT[@]}" "${MH[@]}" --zink --preset performance --no-rcas -- "$GL_BIN"
+  run_case "gl zink+xfsr performance --offload" "$XFSR" "${OUT[@]}" "${MH[@]}" --zink --preset performance --offload -- "$GL_BIN"
 fi
 
 echo

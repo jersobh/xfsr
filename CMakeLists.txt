@@ -228,10 +228,22 @@ target_include_directories(VkLayer_XFSR PRIVATE
 target_compile_definitions(VkLayer_XFSR PRIVATE VK_NO_PROTOTYPES)
 target_compile_options(VkLayer_XFSR PRIVATE -fvisibility=hidden)
 target_link_libraries(VkLayer_XFSR PRIVATE ${CMAKE_DL_LIBS} stdc++)
+# Proton/steamrt ships glibc 2.31; a host-built layer needs GLIBC_2.34+ (dlopen).
+# Prefer pressure-vessel's host-lib overrides (same mechanism as MangoHud under /usr)
+# so dlopen succeeds inside the container; fall back to /usr/lib on the bare host.
+# Use classic DT_RPATH (--disable-new-dtags): Steam sets LD_LIBRARY_PATH, which
+# would otherwise beat DT_RUNPATH and keep resolving steamrt's older libc.
+target_link_options(VkLayer_XFSR PRIVATE
+  "LINKER:--disable-new-dtags"
+  "LINKER:-rpath,/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu"
+  "LINKER:-rpath,/usr/lib/pressure-vessel/overrides/lib/i386-linux-gnu"
+  "LINKER:-rpath,/usr/lib"
+)
 set_target_properties(VkLayer_XFSR PROPERTIES
   PREFIX ""
   OUTPUT_NAME "libVkLayer_XFSR"
   POSITION_INDEPENDENT_CODE ON
+  BUILD_RPATH_USE_ORIGIN TRUE
 )
 
 set(LAYER_LIB_PATH ${CMAKE_CURRENT_BINARY_DIR}/libVkLayer_XFSR.so)

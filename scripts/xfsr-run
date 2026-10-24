@@ -18,9 +18,10 @@ else
 fi
 LAYER_DIR=""
 PRINT_ONLY=0
-# Default OFF: Vulkan / Proton / DXVK titles (CS2, most Steam games) must not get
-# GALLIUM_DRIVER=zink or WAYLAND_DISPLAY cleared. Opt in with --zink for native GL.
-USE_ZINK=0
+# Zink mode: 0=off, 1=on, 2=auto (default). Auto enables Zink for native OpenGL
+# (glmark2, etc.) and leaves it off for Proton/Wine/Vulkan-native titles.
+USE_ZINK=2
+ZINK_CLI=0
 USE_NESTED=0
 USE_MANGOHUD=0
 PREFER_DGPU=1
@@ -40,8 +41,12 @@ RCAS="${XFSR_RCAS:-${CROSSVULKAN_RCAS:-1}}"
 if [[ "${XFSR_MANGOHUD:-0}" == "1" ]]; then
   USE_MANGOHUD=1
 fi
-if [[ "${XFSR_ZINK:-0}" == "1" ]]; then
+if [[ "${XFSR_ZINK:-}" == "1" ]]; then
   USE_ZINK=1
+  ZINK_CLI=1
+elif [[ "${XFSR_ZINK:-}" == "0" ]]; then
+  USE_ZINK=0
+  ZINK_CLI=1
 fi
 
 usage() {
@@ -52,13 +57,13 @@ Options:
   --preset quality|balanced|performance|ultra   FSR scale (default: quality)
                                           ultra = 2.5× (weak GPUs / max FPS)
   --fsr 0|1                               native / FSR1 (default: 1; FSR3 demo-only; FSR4 not yet)
-  --offload / --no-offload                dual-GPU iGPU present (off by default —
-                                          same-GPU FSR is usually faster for games;
-                                          --offload can crash CS2 / some Proton titles)
+  --offload / --no-offload                dual-GPU: dGPU render + iGPU FSR (off by default;
+                                          use for hybrid NVIDIA+AMD max throughput;
+                                          can still stress some Proton titles — try without if unstable)
   --rcas / --no-rcas                      FSR1 sharpening pass (default: on; --no-rcas = EASU only)
-  --zink / --no-zink                      Force Mesa Zink for OpenGL FSR (default: off —
-                                          leave off for Vulkan / Proton / CS2)
-  --mangohud / --hud                      Wrap with MangoHud for FPS/frametime
+  --zink / --no-zink                      Mesa Zink for OpenGL→Vulkan (default: auto —
+                                          on for glmark2/native GL, off for Proton/Vulkan)
+  --mangohud / --hud                      FPS/frametime overlay (GL preload and/or Vulkan layer)
   --igpu                                  Prefer iGPU ICD (default: prefer dGPU)
   --layer-dir DIR                         directory with VkLayer_XFSR.json
   --print                                 print env / command, then exit
@@ -66,10 +71,10 @@ Options:
 
   --nested / --gamescope                  Deprecated (second compositor; not dual-GPU FSR)
 
-Env: XFSR_*, XFSR_VERBOSE=1, XFSR_MANGOHUD=1, XFSR_ZINK=1
+Env: XFSR_*, XFSR_VERBOSE=1, XFSR_MANGOHUD=1, XFSR_ZINK=0|1
 
-Steam (Vulkan/Proton):  xfsr-run --mangohud --preset performance --no-rcas %command%
-OpenGL:                 xfsr-run --zink --preset performance --no-rcas glmark2
+Steam / Vulkan:  xfsr-run --mangohud --preset ultra --offload --no-rcas %command%
+OpenGL:          xfsr-run --mangohud --preset ultra --offload --no-rcas glmark2
 EOF
 }
 
@@ -86,8 +91,9 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
     --print) PRINT_ONLY=1; shift ;;
-    --zink) USE_ZINK=1; shift ;;
-    --no-zink) USE_ZINK=0; shift ;;
+    --zink) USE_ZINK=1; ZINK_CLI=1; shift ;;
+    --no-zink) USE_ZINK=0; ZINK_CLI=1; shift ;;
+    --auto-zink) USE_ZINK=2; ZINK_CLI=1; shift ;;
     --nested|--gamescope) USE_NESTED=1; shift ;;
     --mangohud|--hud) USE_MANGOHUD=1; shift ;;
     --no-mangohud|--no-hud) USE_MANGOHUD=0; shift ;;
@@ -175,18 +181,111 @@ require_mangohud() {
   if [[ $USE_MANGOHUD -eq 0 ]]; then
     return 0
   fi
-  if ! command -v mangohud >/dev/null 2>&1; then
+  if ! command -v mangohud >/dev/null 2>&1 && [[ ! -e /usr/lib/mangohud/libMangoHud.so ]]; then
     echo "xfsr-run: mangohud not found (install mangohud, or drop --mangohud)" >&2
     exit 1
   fi
 }
 
+# Proton / Wine / Steam Linux Runtime → never force Zink (breaks DXVK/Vulkan).
+command_looks_proton() {
+  local a
+  for a in "$@"; do
+    case "$a" in
+      *proton*|*Proton*|*wine*|*Wine*|*waitforexitandrun*|*steam-runtime*|*pressure-vessel*|*reaper*)
+        return 0 ;;
+    esac
+  done
+  [[ -n "${SteamGameId:-}${SteamAppId:-}${STEAM_COMPAT_DATA_PATH:-}" ]] && return 0
+  return 1
+}
+
+# Native OpenGL tools / games that need Zink for the Vulkan FSR layer.
+command_looks_opengl() {
+  local a base
+  for a in "$@"; do
+    [[ "$a" == "--" ]] && continue
+    base="$(basename "$a" 2>/dev/null || echo "$a")"
+    case "$base" in
+      glmark2|glmark2-es2|glmark2-wayland|glxgears|glxinfo|xfsr_load_gl)
+        return 0 ;;
+    esac
+    case "$a" in
+      *glmark2*|*glxgears*|*xfsr_load_gl*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+resolve_zink_mode() {
+  if [[ $ZINK_CLI -eq 1 ]]; then
+    return 0
+  fi
+  if [[ $USE_ZINK -ne 2 ]]; then
+    return 0
+  fi
+  if command_looks_proton "$@"; then
+    USE_ZINK=0
+    echo "xfsr-run: auto: Proton/Wine detected — Zink off (Vulkan/DXVK path)." >&2
+  elif command_looks_opengl "$@"; then
+    USE_ZINK=1
+    echo "xfsr-run: auto: OpenGL title — enabling Zink for FSR." >&2
+  else
+    # Unknown native binary: keep Vulkan path (vkcube, native VK games).
+    USE_ZINK=0
+  fi
+}
+
+find_mangohud_opengl() {
+  # Prefer the official mangohud launcher shim (hooks SwapBuffers + loads opengl.so).
+  # Plain libMangoHud_opengl.so alone is often bypassed when our viewport shim
+  # owns glXGetProcAddress/dlsym first.
+  local cand
+  for cand in \
+    /usr/lib/mangohud/libMangoHud_shim.so \
+    /usr/lib64/mangohud/libMangoHud_shim.so \
+    /usr/lib/mangohud/libMangoHud_opengl.so \
+    /usr/lib64/mangohud/libMangoHud_opengl.so; do
+    if [[ -f "$cand" ]]; then
+      echo "$cand"
+      return 0
+    fi
+  done
+  return 1
+}
+
 run_with_hud() {
   if [[ $USE_MANGOHUD -eq 1 ]]; then
-    # Use MangoHud's implicit Vulkan layer only — do NOT exec the `mangohud`
-    # LD_PRELOAD wrapper. That wrapper can bind vkQueuePresentKHR to the ICD and
-    # skip our FSR present path (glmark2 then shows a postage-stamp corner).
     export MANGOHUD=1
+    if [[ $USE_ZINK -eq 1 ]]; then
+      # Zink presents through our Vulkan layer. A GL MangoHud (SwapBuffers) paints
+      # Zink's GL surface which XFSR never samples — HUD vanishes after FSR.
+      # Use the Vulkan MangoHud layer instead (same as native VK). Keep only the
+      # viewport shim in LD_PRELOAD — do not LD_PRELOAD libMangoHud*.so here.
+      # Strip any mangohud libs an outer wrapper may have injected.
+      if [[ -n "${LD_PRELOAD:-}" ]]; then
+        local cleaned="" part
+        IFS=':' read -r -a _lp <<<"$LD_PRELOAD"
+        for part in "${_lp[@]}"; do
+          case "$part" in
+            *MangoHud*|*mangohud*) continue ;;
+          esac
+          cleaned="${cleaned:+$cleaned:}$part"
+        done
+        export LD_PRELOAD="$cleaned"
+      fi
+      # Ensure MH Vulkan layer is not disabled by ambient env.
+      if [[ -n "${VK_LOADER_LAYERS_DISABLE:-}" ]]; then
+        export VK_LOADER_LAYERS_DISABLE="$(
+          echo "$VK_LOADER_LAYERS_DISABLE" | sed -e 's/VK_LAYER_MANGOHUD_overlay_x86_64,//g' \
+            -e 's/VK_LAYER_MANGOHUD_overlay_x86,//g' -e 's/,VK_LAYER_MANGOHUD_overlay_x86_64//g' \
+            -e 's/,VK_LAYER_MANGOHUD_overlay_x86//g'
+        )"
+      fi
+      echo "xfsr-run: MangoHud via Vulkan layer (Zink+XFSR; GL HUD would be dropped)." >&2
+    fi
+    # Native Vulkan / Proton: MANGOHUD=1 enables the implicit Vulkan layer only
+    # (no mangohud LD_PRELOAD wrapper — that fights XFSR present).
     exec "$@"
   else
     exec "$@"
@@ -228,6 +327,13 @@ if [[ $USE_NESTED -eq 1 ]]; then
   echo "xfsr-run: --nested is deprecated (gamescope is not dual-GPU FSR). Using Vulkan layer." >&2
 fi
 
+# Resolve auto-Zink from the real command line (after options).
+if [[ $PRINT_ONLY -eq 0 ]]; then
+  resolve_zink_mode "$@"
+elif [[ $USE_ZINK -eq 2 ]]; then
+  USE_ZINK=0
+fi
+
 ensure_built
 LAYER_DIR="$(find_layer_dir)" || {
   echo "xfsr-run: layer JSON not found. Try: ./scripts/install-xfsr-run.sh" >&2
@@ -248,17 +354,30 @@ if [[ -z "${XFSR_SHADER_DIR:-}" ]]; then
   done
 fi
 
-# Replace ambient VK_ADD_IMPLICIT_LAYER_PATH (stale project build/ dirs break Proton).
+# Valve/pressure-vessel: do NOT set VK_IMPLICIT_LAYER_PATH / VK_LAYER_PATH — they
+# replace XDG discovery and break imported host layers inside the container.
+# Prefer manifests under ~/.local/share/vulkan (XDG) like the Steam overlay.
+# VK_ADD_IMPLICIT_LAYER_PATH is optional on the host; clear stale project build/ paths.
+unset VK_LAYER_PATH VK_IMPLICIT_LAYER_PATH 2>/dev/null || true
 export VK_ADD_IMPLICIT_LAYER_PATH="${LAYER_DIR}"
-# Pressure-vessel imports ~/.local/share vulkan layers via XDG_DATA_DIRS; ensure
-# both the share prefix and the .so directory are visible inside the container.
-export XDG_DATA_DIRS="${HOME}/.local/share${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}"
+# Prepend ~/.local/share for our layer JSON, but NEVER drop system dirs — an
+# XDG_DATA_DIRS that is only ~/.local/share hides /usr/share/vulkan/icd.d and
+# Zink dies with VK_ERROR_INCOMPATIBLE_DRIVER ("Found no drivers").
+if [[ -z "${XDG_DATA_DIRS:-}" ]]; then
+  export XDG_DATA_DIRS="${HOME}/.local/share:/usr/local/share:/usr/share"
+else
+  export XDG_DATA_DIRS="${HOME}/.local/share:${XDG_DATA_DIRS}"
+fi
 _pv_rw="${HOME}/.local"
 [[ -n "${XFSR_SHADER_DIR:-}" ]] && _pv_rw="${_pv_rw}:${XFSR_SHADER_DIR}"
 export PRESSURE_VESSEL_FILESYSTEMS_RW="${_pv_rw}${PRESSURE_VESSEL_FILESYSTEMS_RW:+:$PRESSURE_VESSEL_FILESYSTEMS_RW}"
+# Extra bind for Proton (some SLR builds honor this more reliably than PV_RW alone).
+export STEAM_COMPAT_MOUNTS="${HOME}/.local${STEAM_COMPAT_MOUNTS:+:$STEAM_COMPAT_MOUNTS}"
 unset _pv_rw
 export ENABLE_XFSR=1
 unset DISABLE_XFSR 2>/dev/null || true
+# Do not set VK_LOADER_LAYERS_ENABLE by default — a failed dlopen then aborts
+# CreateInstance (black screen / instant exit) instead of skipping the layer.
 export XFSR_FSR="$FSR"
 export XFSR_PRESET="$PRESET"
 export XFSR_OFFLOAD="$OFFLOAD"
@@ -330,12 +449,15 @@ if [[ $PREFER_DGPU -eq 1 ]]; then
 fi
 
 # An empty VK_ICD_FILENAMES / VK_DRIVER_FILES means "no drivers" to the loader.
-# Unset so hybrid NVIDIA+AMD ICDs are discovered normally.
+# Unset so hybrid NVIDIA+AMD ICDs are discovered normally. Same for DRI_PRIME=.
 if [[ -z "${VK_ICD_FILENAMES:-}" ]]; then
   unset VK_ICD_FILENAMES 2>/dev/null || true
 fi
 if [[ -z "${VK_DRIVER_FILES:-}" ]]; then
   unset VK_DRIVER_FILES 2>/dev/null || true
+fi
+if [[ -z "${DRI_PRIME:-}" ]]; then
+  unset DRI_PRIME 2>/dev/null || true
 fi
 
 if [[ $PRINT_ONLY -eq 1 ]]; then

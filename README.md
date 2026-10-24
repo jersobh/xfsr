@@ -6,7 +6,7 @@
 
 FSR 1.0 for Linux games — wrap a title like `gamemoderun`, get more FPS by rendering lower and upscaling.
 
-**Current version:** [0.2.0](https://github.com/jersobh/xfsr/releases/tag/v0.2.0)
+**Current version:** [0.2.3](https://github.com/jersobh/xfsr/releases/tag/v0.2.3)
 
 ## What it does
 
@@ -54,13 +54,14 @@ xfsr-run --mangohud --preset performance --no-rcas %command%
 
 Do **not** add `--zink` or `--offload` for these. `--zink` forces Mesa GL→Vulkan and clears Wayland (breaks native Vulkan games). `--offload` has crashed CS2 on hybrid NVIDIA+AMD.
 
-You should see `xfsr-run: layer …` then later `[xfsr] force-scale` / `proxy ready` in the Steam console. If Mega Man / Proton never prints `[xfsr]`, the layer didn’t load inside the runtime — fully quit Steam, clear leftover `XFSR_*` / `GALLIUM_*` env, relaunch Steam, and retry.
+You should see `xfsr-run: layer …` then **`[xfsr] layer active:`** (and later `force-scale` / `proxy ready`) in the Steam console. If Mega Man / Proton never prints `[xfsr]`, the layer `.so` failed to load inside steamrt — reinstall from this tree (`./scripts/install-xfsr-run.sh`; the layer is linked with a pressure-vessel host-lib RPATH), fully quit Steam, clear leftover env, relaunch Steam, and retry.
 
-If CS2 sticks on the Valve logo, update the layer (`curl … install.sh | sh` or rebuild), use the launch line above (no `ultra` until the installed `xfsr-run` supports it), and clear leftover test env before starting Steam:
+Clear leftover test env before starting Steam (empty `VK_ICD_FILENAMES=` or stale `XFSR_OUTPUT_*=800x600` will break games):
 
 ```fish
 set -e GALLIUM_DRIVER MESA_LOADER_DRIVER_OVERRIDE ENABLE_XFSR
 set -e XFSR_OUTPUT_W XFSR_OUTPUT_H XFSR_DISPLAY_EXTENT XFSR_OFFLOAD XFSR_VERBOSE
+set -e VK_ADD_IMPLICIT_LAYER_PATH VK_LAYER_PATH VK_IMPLICIT_LAYER_PATH VK_ICD_FILENAMES
 ```
 
 More FPS: `--preset ultra`. Confirm the layer is live with `XFSR_VERBOSE=1` (look for `proxy ready` / `force-scale` / `first present ok`).
@@ -106,12 +107,12 @@ Needs CMake ≥ 3.20, C++17, `glslc`, Vulkan loader. FSR1 headers: `third_party/
 
 ## Versioning
 
-- [`VERSION`](VERSION) — **0.2.0**
+- [`VERSION`](VERSION) — **0.2.3**
 - [`CHANGELOG.md`](CHANGELOG.md)
 - Tag `vX.Y.Z` → GitHub Actions builds the Linux package the install script downloads
 
 ```sh
-git tag v0.2.0 && git push origin v0.2.0
+git tag v0.2.3 && git push origin v0.2.3
 ```
 
 ## Credits

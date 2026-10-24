@@ -48,9 +48,11 @@ uint32_t findMemoryType(VkPhysicalDevice phys, uint32_t bits, VkMemoryPropertyFl
 const char* kVert = R"(#version 450
 layout(location=0) out vec2 uv;
 void main() {
+  // Same fullscreen triangle as the GL bench, but Vulkan NDC Y is down —
+  // flip clip Y so the raymarch matches OpenGL (floor at bottom).
   vec2 p = vec2((gl_VertexIndex << 1) & 2, gl_VertexIndex & 2);
   uv = p;
-  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+  gl_Position = vec4(p.x * 2.0 - 1.0, -(p.y * 2.0 - 1.0), 0.0, 1.0);
 }
 )";
 

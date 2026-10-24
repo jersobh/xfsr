@@ -87,9 +87,24 @@ void logv(const char* fmt, ...) {
 float presetScaleFromEnv() {
     // xfsr-run exports XFSR_SCALE — prefer it when set (covers ultra 2.5× etc.).
     if (const char* s = std::getenv("XFSR_SCALE")) {
-        char* end = nullptr;
-        const float v = std::strtof(s, &end);
-        if (end != s && v >= 1.01f && v <= 8.0f) return v;
+        // Manual parse — avoid strtof pulling unexpected libc ABIs into the layer.
+        float v = 0.f, frac = 0.f, place = 0.1f;
+        const char* p = s;
+        while (*p == ' ' || *p == '\t') ++p;
+        while (*p >= '0' && *p <= '9') {
+            v = v * 10.f + static_cast<float>(*p - '0');
+            ++p;
+        }
+        if (*p == '.') {
+            ++p;
+            while (*p >= '0' && *p <= '9') {
+                frac += static_cast<float>(*p - '0') * place;
+                place *= 0.1f;
+                ++p;
+            }
+        }
+        v += frac;
+        if (p != s && v >= 1.01f && v <= 8.0f) return v;
     }
     const char* p = xfsrEnv("XFSR_PRESET", "CROSSVULKAN_PRESET_MODE");
     if (!p) return 1.5f;
@@ -103,24 +118,46 @@ float presetScaleFromEnv() {
     return 1.5f;
 }
 
+// Parse unsigned decimal without strto*/sscanf (those bind __isoc23_*@GLIBC_2.38
+// on modern toolchains and break Proton/steamrt's glibc 2.31 dlopen).
+bool parseU32(const char* s, uint32_t* out, const char** endOut = nullptr) {
+    if (!s || !out) return false;
+    const char* p = s;
+    while (*p == ' ' || *p == '\t') ++p;
+    if (*p < '0' || *p > '9') return false;
+    uint32_t v = 0;
+    while (*p >= '0' && *p <= '9') {
+        const uint32_t d = static_cast<uint32_t>(*p - '0');
+        if (v > (UINT32_MAX - d) / 10u) return false;
+        v = v * 10u + d;
+        ++p;
+    }
+    *out = v;
+    if (endOut) *endOut = p;
+    return true;
+}
+
 // Wayland often reports currentExtent=UINT_MAX until the first swapchain exists, so
 // caps-shrink never runs and benches stay identity @ full window (flat FPS). Hint the
 // real window via XFSR_DISPLAY_EXTENT=WxH (xfsr-run --output) or XFSR_OUTPUT_*.
 void applyDisplayExtentHint(uint32_t* outW, uint32_t* outH) {
     if (!outW || !outH) return;
     const char* e = xfsrEnv("XFSR_DISPLAY_EXTENT", "CROSSVULKAN_DISPLAY_EXTENT");
-    unsigned w = 0, h = 0;
-    if (e && e[0] && std::sscanf(e, "%ux%u", &w, &h) == 2 && w > 0 && h > 0) {
-        *outW = w;
-        *outH = h;
-        return;
+    if (e && e[0]) {
+        uint32_t pw = 0, ph = 0;
+        const char* mid = nullptr;
+        if (parseU32(e, &pw, &mid) && mid && (*mid == 'x' || *mid == 'X') &&
+            parseU32(mid + 1, &ph) && pw > 0 && ph > 0) {
+            *outW = pw;
+            *outH = ph;
+            return;
+        }
     }
     const char* ew = std::getenv("XFSR_OUTPUT_W");
     const char* eh = std::getenv("XFSR_OUTPUT_H");
     if (ew && eh) {
-        w = static_cast<unsigned>(std::atoi(ew));
-        h = static_cast<unsigned>(std::atoi(eh));
-        if (w > 0 && h > 0) {
+        uint32_t w = 0, h = 0;
+        if (parseU32(ew, &w) && parseU32(eh, &h) && w > 0 && h > 0) {
             *outW = w;
             *outH = h;
         }
@@ -152,8 +189,20 @@ bool offloadEnabled() {
 
 // When the app ignores caps shrink (DXVK/Proton often does), force render extent in
 // CreateSwapchain. Default ON when FSR is enabled. XFSR_FORCE_SCALE=0 disables.
+// WARNING: force-scale must NEVER create proxy images smaller than the app's
+// imageExtent — framebuffers are sized to that extent (DEVICE_LOST otherwise).
 bool forceScaleEnabled() {
     const char* o = xfsrEnv("XFSR_FORCE_SCALE", "CROSSVULKAN_FORCE_SCALE");
+    if (o && o[0] == '0') return false;
+    if (o && o[0] == '1') return true;
+    return fsrEnabled();
+}
+
+// Advertise shrunk currentExtent so well-behaved apps (xfsr_load_vk, Zink) create
+// matching framebuffers. Default ON. Set XFSR_CAPS_SHRINK=0 for Source2/CS2 which
+// treat currentExtent changes as a resize storm.
+bool capsShrinkEnabled() {
+    const char* o = xfsrEnv("XFSR_CAPS_SHRINK", "CROSSVULKAN_CAPS_SHRINK");
     if (o && o[0] == '0') return false;
     if (o && o[0] == '1') return true;
     return fsrEnabled();
@@ -209,6 +258,9 @@ struct InstanceData {
     float scale = 1.5f;
     uint32_t realW = 0;
     uint32_t realH = 0;
+    bool realFromSurface = false; // realW/H came from compositor (not DISPLAY_EXTENT alone)
+    uint32_t hintW = 0;           // XFSR_DISPLAY_EXTENT / OUTPUT_* seed for Wayland games
+    uint32_t hintH = 0;
     bool capsShrunk = false; // true when we rewrote currentExtent to render res
     bool volkReady = false;
     // Dedupe caps-shrink logs (Zink queries every frame).
@@ -302,12 +354,17 @@ struct ProxySwapchain {
     VkSemaphore renderFinished[kFrames]{};
     VkFence inFlight[kFrames]{};
     uint32_t frameSlot = 0;
+    // Per app-image release fences — fake acquire must not recycle an image while
+    // present/FSR still reads it (NVIDIA DEVICE_LOST / xfsr_load_vk wait -4).
+    std::vector<VkFence> appImgFence;
+    VkFence lastCmdFence[kFrames]{}; // borrowed: which fence guards cmds[slot]
 
     FsrPass fsr{};
     bool pipelineReady = false;
     bool offloadIgpu = false; // true: FrameTransfer → iGPU (FSR and/or present)
-    // Zink/NVIDIA GLX SIGSEGVs if the window WSI is on the iGPU (opaque app handle).
-    // Keep present on dGPU; still FSR on iGPU via host round-trip.
+    // Hybrid NVIDIA dGPU + AMD iGPU: an iGPU-owned window WSI (opaque app handle)
+    // SIGSEGVs when the app/MangoHud/ICD leak WSI calls to the NVIDIA dispatch.
+    // Always keep present on the dGPU; FSR on iGPU via host round-trip.
     bool zinkOffloadRoundtrip = false;
     bool useFsr = false;      // FSR1 EASU/RCAS when XFSR_FSR=1 and scaling
 
@@ -317,6 +374,10 @@ struct ProxySwapchain {
 };
 
 std::mutex g_mu;
+// Present (often Zink's queue thread) vs Create/DestroySwapchain (main thread):
+// without this, destroyProxy/FrameTransfer::resize frees state mid-present →
+// SIGSEGV in ICD/MangoHud (seen on gl zink+offload).
+std::mutex g_proxyLife;
 std::unordered_map<void*, InstanceData*> g_instances;
 std::unordered_map<void*, DeviceData*> g_devices;
 std::unordered_map<void*, ProxySwapchain*> g_proxies;
@@ -333,9 +394,33 @@ ProxySwapchain* proxyOf(VkSwapchainKHR s) {
     return it == g_proxies.end() ? nullptr : it->second;
 }
 
-// Present WSI lives on iGPU only for classic dual-GPU (non-Zink). Zink round-trip keeps dGPU WSI.
+// Present WSI stays on the app/dGPU device whenever round-trip offload is used.
 bool presentsOnIgpu(const ProxySwapchain* ps) {
     return ps && ps->offloadIgpu && !ps->zinkOffloadRoundtrip;
+}
+
+// Monotonic opaque swapchain ids — never reuse heap addresses as VkSwapchainKHR
+// (MangoHud / apps cache by handle; pointer recycling → use-after-free SIGSEGV).
+std::atomic<uint64_t> g_opaqueSwapchainSerial{1};
+VkSwapchainKHR makeOpaqueSwapchainHandle() {
+    const uint64_t id = g_opaqueSwapchainSerial.fetch_add(1, std::memory_order_relaxed);
+    // Non-zero, low-bit clear; distinct from real ICD pointers on 64-bit Linux.
+    return reinterpret_cast<VkSwapchainKHR>((id << 4) | 0x1ull);
+}
+
+void waitOffloadIdle(DeviceData* dd) {
+    if (!dd) return;
+    auto waitCtx = [](DeviceContext& ctx) {
+        if (!ctx.device) return;
+        ctx.loadDispatch();
+        auto& d = ctx.vk;
+        if (!d.QueueWaitIdle) return;
+        if (ctx.graphicsQueue) d.QueueWaitIdle(ctx.graphicsQueue);
+        if (ctx.presentQueue && ctx.presentQueue != ctx.graphicsQueue)
+            d.QueueWaitIdle(ctx.presentQueue);
+    };
+    if (dd->dgpuReady) waitCtx(dd->dgpu);
+    if (dd->igpuReady) waitCtx(dd->igpu);
 }
 
 template <typename T>
@@ -376,6 +461,17 @@ WsiFns wsiFnsFor(DeviceData* dd, bool offloadIgpu) {
     return f;
 }
 
+void destroyAppImgFences(ProxySwapchain* ps, DeviceData* dd) {
+    if (!ps || !dd || !dd->dgpu.device) return;
+    dd->dgpu.loadDispatch();
+    auto& d = dd->dgpu.vk;
+    for (VkFence f : ps->appImgFence) {
+        if (f && d.DestroyFence) d.DestroyFence(dd->dgpu.device, f, nullptr);
+    }
+    ps->appImgFence.clear();
+    for (uint32_t i = 0; i < ProxySwapchain::kFrames; ++i) ps->lastCmdFence[i] = VK_NULL_HANDLE;
+}
+
 void destroyPresentRing(ProxySwapchain* ps, DeviceContext& ctx) {
     if (!ps || !ctx.device) return;
     ctx.loadDispatch();
@@ -411,6 +507,7 @@ void destroyProxy(ProxySwapchain* ps) {
         ps->fsr.destroy();
         ps->pipelineReady = false;
     }
+    if (dd) destroyAppImgFences(ps, dd);
     for (auto& img : ps->appImages) img.destroy();
     ps->appImages.clear();
     if (dd) {
@@ -569,11 +666,13 @@ bool setupOffloadPipeline(ProxySwapchain* ps, VkSwapchainKHR oldPresentSwapchain
                 logv("[xfsr] no scale (render==display) — skip dual-GPU transfer\n");
             }
         }
-        // Zink + NVIDIA GLX cannot survive an iGPU-owned window WSI. Keep present on
-        // the dGPU; still run FSR on the iGPU via dGPU→iGPU→dGPU round-trip.
-        ps->zinkOffloadRoundtrip = ps->offloadIgpu && zinkActive();
+        // Always round-trip when offloading: dGPU owns the window WSI (real ICD
+        // handle for the app/MangoHud), iGPU runs FSR. Classic iGPU-present used an
+        // opaque fake swapchain and SIGSEGV'd under vkcube/MangoHud/NVIDIA leaks.
+        ps->zinkOffloadRoundtrip = ps->offloadIgpu;
         if (ps->zinkOffloadRoundtrip) {
-            logv("[xfsr] Zink+offload: dGPU WSI + iGPU FSR (round-trip)\n");
+            logv("[xfsr] offload: dGPU WSI + iGPU FSR (round-trip)%s\n",
+                 zinkActive() ? " [zink]" : "");
         }
         DeviceContext* presentCtx =
             presentsOnIgpu(ps) ? &dd->igpu : &dd->dgpu;
@@ -646,19 +745,26 @@ bool setupOffloadPipeline(ProxySwapchain* ps, VkSwapchainKHR oldPresentSwapchain
             }
         }
         // Prefer STORAGE so FSR can write the swapchain directly (skip fullscreen copy).
-        const VkImageUsageFlags presentUsage =
+        // Must track whether STORAGE was actually granted — NVIDIA often rejects
+        // STORAGE on WSI and the fallback lacks it; writing STORAGE then DEVICE_LOSTs.
+        const VkImageUsageFlags presentUsageStorage =
             ps->imageUsage | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
+        const VkImageUsageFlags presentUsageBlit =
+            ps->imageUsage | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
         const VkImageUsageFlags shadowUsage =
             ps->imageUsage | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        bool presentHasStorage = false;
 
         auto createPresentWsi = [&](DeviceContext* ctx, bool igpuWsi, VkSwapchainKHR oldSc,
                                     VkSwapchainKHR* out) -> VkResult {
-            VkResult cr = createWsi(ctx, igpuWsi, {presentW, presentH}, presentUsage, oldSc, out);
-            if (cr != VK_SUCCESS) {
-                cr = createWsi(ctx, igpuWsi, {presentW, presentH},
-                               ps->imageUsage | VK_IMAGE_USAGE_TRANSFER_DST_BIT, oldSc, out);
+            presentHasStorage = false;
+            VkResult cr =
+                createWsi(ctx, igpuWsi, {presentW, presentH}, presentUsageStorage, oldSc, out);
+            if (cr == VK_SUCCESS) {
+                presentHasStorage = true;
+                return cr;
             }
-            return cr;
+            return createWsi(ctx, igpuWsi, {presentW, presentH}, presentUsageBlit, oldSc, out);
         };
 
         // Display-sized WSI only. Classic dual-GPU: iGPU owns the window; app handle is
@@ -710,6 +816,16 @@ bool setupOffloadPipeline(ProxySwapchain* ps, VkSwapchainKHR oldPresentSwapchain
                 createImage(&dd->dgpu, ps->renderW, ps->renderH, ps->format, appUsage,
                             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, VK_IMAGE_TILING_OPTIMAL, true);
         }
+        {
+            destroyAppImgFences(ps, dd);
+            VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+            fci.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+            ps->appImgFence.resize(ps->appImages.size());
+            for (size_t i = 0; i < ps->appImgFence.size(); ++i) {
+                vkCheck(dd->dgpu.vk.CreateFence(dd->dgpu.device, &fci, nullptr, &ps->appImgFence[i]),
+                        "appImgFence");
+            }
+        }
 
         ps->useFsr = scaling && layerFsrPassEnabled();
         ps->fsrDirectToSwapchain = false;
@@ -720,7 +836,12 @@ bool setupOffloadPipeline(ProxySwapchain* ps, VkSwapchainKHR oldPresentSwapchain
             ps->fsr.init(fsrCtx);
             ps->fsr.resize(ps->renderW, ps->renderH, ps->displayW, ps->displayH);
             // Round-trip FSR writes an iGPU image; cannot STORAGE into the dGPU swapchain.
-            if (!ps->zinkOffloadRoundtrip && ps->fsr.canDirectToSwapchain(ps->format)) {
+            // Direct STORAGE→WSI DEVICE_LOSTs on NVIDIA GTX 1650 after the first present
+            // even when STORAGE usage was granted (BGRA_UNORM). Prefer FSR→blit.
+            (void)presentHasStorage;
+            const bool fmtOkDirect = false && presentHasStorage && !ps->zinkOffloadRoundtrip &&
+                                     ps->fsr.canDirectToSwapchain(ps->format);
+            if (fmtOkDirect) {
                 ps->realViews.resize(ps->realImages.size());
                 for (size_t i = 0; i < ps->realImages.size(); ++i) {
                     VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
@@ -845,7 +966,12 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateInstance(const VkInstanceCreateInfo* p
     id->layerCreateDevice = layerCreateDevice;
     id->layerDestroyDevice = layerDestroyDevice;
     id->scale = presetScaleFromEnv();
-    applyDisplayExtentHint(&id->realW, &id->realH);
+    applyDisplayExtentHint(&id->hintW, &id->hintH);
+    // Keep hint in realW only for caps-shrink seeding; queryTrueSurfaceExtent ignores
+    // it until a concrete compositor extent is seen (avoids 1080p WSI on tiny windows).
+    id->realW = id->hintW;
+    id->realH = id->hintH;
+    id->realFromSurface = false;
     id->DestroyInstance = getInstProc<PFN_vkDestroyInstance>(id, "vkDestroyInstance");
     id->EnumeratePhysicalDevices =
         getInstProc<PFN_vkEnumeratePhysicalDevices>(id, "vkEnumeratePhysicalDevices");
@@ -871,6 +997,15 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateInstance(const VkInstanceCreateInfo* p
         id->volkReady = true;
     }
 
+    // Always print once so Steam/Proton consoles show the layer actually loaded
+    // (logv is gated on XFSR_VERBOSE and was easy to miss when injection failed).
+    std::fprintf(stderr,
+                 "[xfsr] layer active: scale=%.2f displayHint=%s%ux%u offload=%s\n",
+                 id->scale,
+                 (id->realW && id->realH) ? "" : "none ",
+                 id->realW, id->realH,
+                 (std::getenv("XFSR_OFFLOAD") && std::getenv("XFSR_OFFLOAD")[0] == '1') ? "1"
+                                                                                         : "0");
     logv("[xfsr] instance scale=%.2f (layerCreateDevice=%s)%s%ux%u\n", id->scale,
          id->layerCreateDevice ? "yes" : "no",
          (id->realW && id->realH) ? " displayHint=" : " displayHint=none ",
@@ -912,17 +1047,18 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_GetPhysicalDeviceSurfaceCapabilitiesKHR(
 
     const uint32_t cw = pSurfaceCapabilities->currentExtent.width;
     const uint32_t ch = pSurfaceCapabilities->currentExtent.height;
-    // Remember true window size (needed by CreateSwapchain force-scale / present WSI).
+    // Remember true window size (needed by CreateSwapchain present WSI / proxy display).
     if (cw != 0xFFFFFFFFu && ch != 0xFFFFFFFFu && cw > 0 && ch > 0) {
         id->realW = cw;
         id->realH = ch;
+        id->realFromSurface = true;
     }
 
-    // Caps-shrink ONLY for Zink. Native Vulkan / DXVK / CS2 create at the real window
-    // size; if we advertise currentExtent=render, Source2 treats it as a resize every
-    // frame → swapchain recreate storm + QueueWaitIdle → stuck on the logo at ~FPS.
-    // Those titles get FSR via force-scale in CreateSwapchain instead.
-    if (!zinkActive()) return r;
+    // Caps-shrink so apps that honor currentExtent (xfsr_load_vk, Zink+shim) create
+    // render-sized swapchains/framebuffers. Force-scale alone cannot shrink images
+    // below the app's imageExtent (FB > image → NVIDIA DEVICE_LOST).
+    // Opt out: XFSR_CAPS_SHRINK=0 (Source2/CS2 resize storm).
+    if (!capsShrinkEnabled()) return r;
 
     if (id->GetPhysicalDeviceProperties) {
         VkPhysicalDeviceProperties props{};
@@ -931,8 +1067,8 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_GetPhysicalDeviceSurfaceCapabilitiesKHR(
         if (!discrete) return r;
     }
 
-    // Zink: shrink currentExtent so the GL drawable matches render size; shim remaps
-    // glViewport. Wayland UINT_MAX: once we know the window, replace with shrunk size.
+    // Shrink currentExtent to render size; maxImageExtent stays at the window so
+    // present WSI can still be full-size. Wayland UINT_MAX: use remembered real size.
     uint32_t winW = 0, winH = 0;
     if (cw != 0xFFFFFFFFu && ch != 0xFFFFFFFFu && cw > 0 && ch > 0) {
         winW = cw;
@@ -960,8 +1096,8 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_GetPhysicalDeviceSurfaceCapabilitiesKHR(
             id->lastLogCh = winH;
             id->lastLogRw = rw;
             id->lastLogRh = rh;
-            logv("[xfsr] caps shrink (zink) current %ux%u → %ux%u (max stays %ux%u)\n", winW, winH,
-                 rw, rh, winW, winH);
+            logv("[xfsr] caps shrink current %ux%u → %ux%u (max stays %ux%u)%s\n", winW, winH, rw,
+                 rh, winW, winH, zinkActive() ? " [zink]" : "");
         }
     }
     return r;
@@ -1163,10 +1299,10 @@ VkSwapchainKHR realOldSwapchain(VkSwapchainKHR oldSwapchain) {
     return oldPs ? oldPs->realSwapchain : oldSwapchain;
 }
 
-// True window size from the ICD (never the shrunk currentExtent). Updates inst->realW/H.
-// Wayland often reports currentExtent=0xFFFFFFFF — maxImageExtent is a driver ceiling, not
-// the window, so we must not treat it as the display size (that caused postage-stamps or
-// runaway 2× growth when callers invented display=app*scale).
+// True window size from the ICD (never the shrunk currentExtent). Updates inst->realW/H
+// only when the compositor reports a concrete currentExtent.
+// Wayland often reports currentExtent=0xFFFFFFFF — do NOT fall back to XFSR_DISPLAY_EXTENT
+// here (that forced a 1080p WSI onto vkcube's 500² window → NVIDIA DEVICE_LOST).
 bool queryTrueSurfaceExtent(DeviceData* dd, VkSurfaceKHR surface, uint32_t* outW, uint32_t* outH) {
     if (!dd || !dd->inst || !outW || !outH) return false;
     InstanceData* id = dd->inst;
@@ -1187,16 +1323,32 @@ bool queryTrueSurfaceExtent(DeviceData* dd, VkSurfaceKHR surface, uint32_t* outW
         }
     }
     if (w == 0 || h == 0) {
-        // Cached from a prior concrete caps query / successful proxy.
-        w = id->realW;
-        h = id->realH;
+        // Only reuse a size that came from a prior *concrete* compositor query —
+        // never the XFSR_DISPLAY_EXTENT seed alone (see applyDisplayExtentHint).
+        if (id->realFromSurface && id->realW > 0 && id->realH > 0) {
+            w = id->realW;
+            h = id->realH;
+        }
     }
     if (w == 0 || h == 0) return false;
     id->realW = w;
     id->realH = h;
+    id->realFromSurface = true;
     *outW = w;
     *outH = h;
     return true;
+}
+
+// XFSR_DISPLAY_EXTENT / OUTPUT_* — used when the app creates a near-fullscreen swapchain
+// on Wayland (UINT_MAX currentExtent) so force-scale still knows the target present size.
+bool displayExtentHint(InstanceData* id, uint32_t* outW, uint32_t* outH) {
+    if (!id || !outW || !outH) return false;
+    if (id->hintW > 0 && id->hintH > 0) {
+        *outW = id->hintW;
+        *outH = id->hintH;
+        return true;
+    }
+    return false;
 }
 
 VkResult createSwapchainPassthrough(DeviceData* dd, const VkSwapchainCreateInfoKHR* pCreateInfo,
@@ -1283,38 +1435,68 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSwapchainKHR(VkDevice device,
     ps->renderH = appH;
 
     uint32_t surfW = 0, surfH = 0;
-    const bool haveSurf = queryTrueSurfaceExtent(dd, pCreateInfo->surface, &surfW, &surfH);
+    bool haveSurf = queryTrueSurfaceExtent(dd, pCreateInfo->surface, &surfW, &surfH);
     const float scale = dd->inst ? dd->inst->scale : 1.5f;
+    uint32_t hintW = 0, hintH = 0;
+    const bool haveHint = displayExtentHint(dd->inst, &hintW, &hintH);
 
-            if (haveSurf && (appW < surfW || appH < surfH)) {
+    // Prefer compositor-measured size; fall back to last caps-shrink memory / hint.
+    if (!haveSurf && dd->inst && dd->inst->realW > 0 && dd->inst->realH > 0) {
+        surfW = dd->inst->realW;
+        surfH = dd->inst->realH;
+        haveSurf = true;
+    }
+    if (haveSurf && (appW < surfW || appH < surfH)) {
         // App honored caps shrink (native VK or Zink+shim) — present at true window.
         ps->displayW = surfW;
         ps->displayH = surfH;
+        ps->renderW = appW;
+        ps->renderH = appH;
         if (zinkActive()) {
             logv("[xfsr] zink proxy: render %ux%u → display %ux%u (needs libxfsr_gl_shim)\n", appW,
                  appH, surfW, surfH);
+        } else {
+            logv("[xfsr] caps-honored proxy: render %ux%u → display %ux%u\n", appW, appH, surfW,
+                 surfH);
         }
     } else if (forceScaleEnabled() && !zinkActive()) {
         // Full-window create (DXVK / apps that ignore caps): present at window size,
-        // render at preset. Never invent display=app*scale.
-        const uint32_t winW = haveSurf ? std::max(surfW, appW) : appW;
-        const uint32_t winH = haveSurf ? std::max(surfH, appH) : appH;
+        // render at preset. On Wayland without a concrete extent, only trust the
+        // DISPLAY_EXTENT hint when the app is creating a near-fullscreen swapchain
+        // (otherwise vkcube 500² + hint 1080p → DEVICE_LOST).
+        uint32_t winW = appW;
+        uint32_t winH = appH;
+        if (haveSurf) {
+            winW = std::max(surfW, appW);
+            winH = std::max(surfH, appH);
+        } else if (haveHint && hintW > 0 && hintH > 0) {
+            const bool nearFullscreen =
+                appW >= (hintW * 4u) / 5u && appH >= (hintH * 4u) / 5u;
+            if (nearFullscreen) {
+                winW = hintW;
+                winH = hintH;
+            }
+        }
         uint32_t rw = 0, rh = 0;
         computeRenderSize(winW, winH, scale, &rw, &rh);
-        if (rw < winW || rh < winH) {
-            ps->renderW = rw;
-            ps->renderH = rh;
-            ps->displayW = winW;
-            ps->displayH = winH;
-            if (dd->inst) {
-                dd->inst->realW = winW;
-                dd->inst->realH = winH;
-            }
-            logv("[xfsr] force-scale: app %ux%u → render %ux%u display %ux%u\n", appW, appH, rw, rh,
-                 winW, winH);
-        } else {
-            ps->displayW = winW;
-            ps->displayH = winH;
+        ps->displayW = winW;
+        ps->displayH = winH;
+        if (dd->inst) {
+            dd->inst->realW = winW;
+            dd->inst->realH = winH;
+            if (haveSurf) dd->inst->realFromSurface = true;
+        }
+        // Only shrink render below app extent when the app already requested a
+        // smaller swapchain (honored caps). Shrinking images while the app builds
+        // appW×appH framebuffers DEVICE_LOSTs on NVIDIA.
+        if ((rw < appW || rh < appH) && (appW < winW || appH < winH)) {
+            ps->renderW = std::max(rw, 1u);
+            ps->renderH = std::max(rh, 1u);
+            logv("[xfsr] force-scale: app %ux%u → render %ux%u display %ux%u\n", appW, appH,
+                 ps->renderW, ps->renderH, winW, winH);
+        } else if (rw < winW || rh < winH) {
+            logv("[xfsr] force-scale skipped (app %ux%u == window; enable caps-shrink)\n", appW,
+                 appH);
         }
     } else {
         // Unknown surface: trust app extent. Do not invent app*scale.
@@ -1323,6 +1505,7 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSwapchainKHR(VkDevice device,
         if (dd->inst && appW > 0 && appH > 0) {
             dd->inst->realW = appW;
             dd->inst->realH = appH;
+            dd->inst->realFromSurface = haveSurf;
         }
     }
 
@@ -1350,6 +1533,13 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSwapchainKHR(VkDevice device,
             }
         }
         if (oldPs) {
+            // Serialize with QueuePresent — Zink presents on a worker while the
+            // main thread recreates; freeing the proxy under a live present SIGSEGVs.
+            std::lock_guard<std::mutex> life(g_proxyLife);
+            if (oldPs->offloadIgpu || (dd && (dd->xferReady || dd->xferBackReady)))
+                waitOffloadIdle(dd);
+            else if (dd && dd->dgpuReady)
+                waitOffloadIdle(dd);
             oldPresent = oldPs->realSwapchain;
             if (!oldPs->opaqueAppHandle && oldPs->appSwapchain &&
                 oldPs->appSwapchain != oldPs->realSwapchain)
@@ -1364,17 +1554,23 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSwapchainKHR(VkDevice device,
     }
     (void)oldShadow;
 
-    if (!setupOffloadPipeline(ps, oldPresent, oldShadow)) {
-        std::fprintf(stderr,
-                     "[xfsr] proxy setup failed (render %ux%u display %ux%u) — passthrough\n",
-                     ps->renderW, ps->renderH, ps->displayW, ps->displayH);
-        delete ps;
-        return createSwapchainPassthrough(dd, pCreateInfo, pAllocator, pSwapchain);
+    // Hold life lock across setup so a concurrent present cannot observe a
+    // half-resized FrameTransfer / FSR pass (dual-GPU round-trip).
+    {
+        std::lock_guard<std::mutex> life(g_proxyLife);
+        if (!setupOffloadPipeline(ps, oldPresent, oldShadow)) {
+            std::fprintf(stderr,
+                         "[xfsr] proxy setup failed (render %ux%u display %ux%u) — passthrough\n",
+                         ps->renderW, ps->renderH, ps->displayW, ps->displayH);
+            delete ps;
+            return createSwapchainPassthrough(dd, pCreateInfo, pAllocator, pSwapchain);
+        }
     }
 
-    // Same-GPU: real ICD swapchain handle. Dual-GPU: opaque pointer (window WSI is iGPU-only).
+    // Same-GPU / round-trip offload: real ICD swapchain handle.
+    // Legacy opaque path (if ever re-enabled): unique serial, never a recycled pointer.
     if (ps->opaqueAppHandle) {
-        ps->handle = reinterpret_cast<VkSwapchainKHR>(reinterpret_cast<uintptr_t>(ps));
+        ps->handle = makeOpaqueSwapchainHandle();
         ps->appSwapchain = ps->handle;
     } else {
         ps->handle = ps->appSwapchain ? ps->appSwapchain : ps->realSwapchain;
@@ -1407,6 +1603,11 @@ VKAPI_ATTR void VKAPI_CALL xfsr_DestroySwapchainKHR(VkDevice device, VkSwapchain
         if (dit != g_devices.end()) dd = dit->second;
     }
     if (ps) {
+        std::lock_guard<std::mutex> life(g_proxyLife);
+        if (ps->offloadIgpu || (dd && (dd->xferReady || dd->xferBackReady)))
+            waitOffloadIdle(dd);
+        else if (dd && dd->dgpuReady)
+            waitOffloadIdle(dd);
         destroyProxy(ps);
         return;
     }
@@ -1451,11 +1652,21 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_AcquireNextImageKHR(VkDevice device, VkSwapc
         if (dit != g_devices.end()) dd = dit->second;
     }
     if (ps && ps->pipelineReady) {
-        // Fake acquire: app images are always available. Must signal sync objects —
-        // vkcube waits on the acquire semaphore before drawing.
-        // Do NOT touch dd->dgpu.cmd here — present owns that buffer.
-        ps->acquireIndex = (ps->acquireIndex + 1) % static_cast<uint32_t>(ps->appImages.size());
+        // Fake acquire: pick next app image, but WAIT until the last present/FSR that
+        // read it has finished — otherwise the app redraws into an image still sampled
+        // by our present cmd (NVIDIA DEVICE_LOST; xfsr_load_vk "wait failed (-4)").
+        const uint32_t nImg = static_cast<uint32_t>(ps->appImages.size());
+        if (nImg == 0) return VK_ERROR_OUT_OF_DATE_KHR;
+        ps->acquireIndex = (ps->acquireIndex + 1) % nImg;
         *pImageIndex = ps->acquireIndex;
+        if (dd && *pImageIndex < ps->appImgFence.size() && ps->appImgFence[*pImageIndex] &&
+            dd->WaitForFences) {
+            VkResult wr =
+                dd->WaitForFences(dd->device, 1, &ps->appImgFence[*pImageIndex], VK_TRUE, UINT64_MAX);
+            if (wr != VK_SUCCESS) return wr;
+        }
+        // Signal sync objects — vkcube waits on the acquire semaphore before drawing.
+        // Do NOT touch dd->dgpu.cmd here — present owns that buffer.
         if (dd && dd->QueueSubmit &&
             (semaphore != VK_NULL_HANDLE || fence != VK_NULL_HANDLE)) {
             VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
@@ -1626,6 +1837,10 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
         return VK_ERROR_INITIALIZATION_FAILED;
     }
 
+    // Hold for the whole proxy present so Create/DestroySwapchain cannot free
+    // FrameTransfer / proxy images under us (Zink dual-GPU + MangoHud SIGSEGV).
+    std::unique_lock<std::mutex> life(g_proxyLife);
+
     ProxySwapchain* ps = nullptr;
     DeviceData* dd = nullptr;
     {
@@ -1635,6 +1850,7 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
     }
 
     if (!ps || !ps->pipelineReady || !dd) {
+        life.unlock();
         if (dd && dd->QueuePresentKHR) return dd->QueuePresentKHR(queue, pPresentInfo);
         std::lock_guard<std::mutex> lock(g_mu);
         if (!g_devices.empty())
@@ -1700,8 +1916,24 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
         WsiFns wsi = wsiFnsFor(dd, presentsOnIgpu(ps));
         if (!wsi.AcquireNextImageKHR || !wsi.QueuePresentKHR) return VK_ERROR_DEVICE_LOST;
 
-        vkCheck(pd.WaitForFences(presentCtx.device, 1, &fence, VK_TRUE, UINT64_MAX), "wait");
-        vkCheck(pd.ResetFences(presentCtx.device, 1, &fence), "reset fence");
+        // Recycle present cmd slot (may be a prior appImgFence on the same device).
+        dd->dgpu.loadDispatch();
+        auto& dgpuVk = dd->dgpu.vk;
+        if (ps->lastCmdFence[slot]) {
+            vkCheck(dgpuVk.WaitForFences(dd->dgpu.device, 1, &ps->lastCmdFence[slot], VK_TRUE,
+                                         UINT64_MAX),
+                    "wait cmd slot");
+        } else {
+            vkCheck(pd.WaitForFences(presentCtx.device, 1, &fence, VK_TRUE, UINT64_MAX), "wait");
+        }
+        vkCheck(pd.ResetFences(presentCtx.device, 1, &fence), "reset present-ring fence");
+        VkFence imgRelease = VK_NULL_HANDLE;
+        if (idx < ps->appImgFence.size()) imgRelease = ps->appImgFence[idx];
+        if (imgRelease) {
+            vkCheck(dgpuVk.WaitForFences(dd->dgpu.device, 1, &imgRelease, VK_TRUE, UINT64_MAX),
+                    "wait app img");
+            vkCheck(dgpuVk.ResetFences(dd->dgpu.device, 1, &imgRelease), "reset app img fence");
+        }
 
         uint32_t realIdx = 0;
         VkResult acq = wsi.AcquireNextImageKHR(presentCtx.device, ps->realSwapchain, UINT64_MAX,
@@ -1870,10 +2102,23 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
         si.pCommandBuffers = &cmd;
         si.signalSemaphoreCount = 1;
         si.pSignalSemaphores = &doneSem;
+        // Prefer appImgFence when present runs on the app/dGPU device so acquire can
+        // wait for FSR/blit to finish reading that image. Fall back to present-ring fence.
+        VkFence submitFence = fence;
+        if (imgRelease && presentCtx.device == dd->dgpu.device) submitFence = imgRelease;
         vkCheck(pd.QueueSubmit(presentCtx.presentQueue ? presentCtx.presentQueue
                                                        : presentCtx.graphicsQueue,
-                               1, &si, fence),
+                               1, &si, submitFence),
                 "submit");
+        ps->lastCmdFence[slot] = submitFence;
+        if (imgRelease && submitFence != imgRelease) {
+            // Present on another device: mark image free after a dGPU no-op wait for
+            // prior transfer work (round-trip / classic already finished the download).
+            VkSubmitInfo mark{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+            vkCheck(dgpuVk.QueueSubmit(dd->dgpu.graphicsQueue, 1, &mark, imgRelease),
+                    "signal app img release");
+            ps->lastCmdFence[slot] = imgRelease;
+        }
 
         VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
         pi.waitSemaphoreCount = 1;

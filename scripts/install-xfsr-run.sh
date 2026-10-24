@@ -36,14 +36,23 @@ done
 shopt -u nullglob
 
 python3 - <<PY
-import json, pathlib
+import json, pathlib, os
 src = pathlib.Path("$BUILD/VkLayer_XFSR.json")
 dst = pathlib.Path("$PREFIX/share/vulkan/implicit_layer.d/VkLayer_XFSR.json")
+lib = pathlib.Path("$PREFIX/lib/libVkLayer_XFSR.so").resolve()
 data = json.loads(src.read_text())
-data["layer"]["library_path"] = str(pathlib.Path("$PREFIX/lib/libVkLayer_XFSR.so").resolve())
+# Relative to the JSON dir so pressure-vessel path rewrites stay valid.
+data["layer"]["library_path"] = os.path.relpath(lib, dst.parent)
+# Keep api_version conservative for older Steam loaders.
+data["layer"]["api_version"] = data["layer"].get("api_version", "1.3.0")
 dst.write_text(json.dumps(data, indent=2) + "\n")
 print("wrote", dst)
 print("library_path =", data["layer"]["library_path"])
+# Show glibc deps — anything > 2.31 needs PV host-lib RPATH to load in Proton.
+import subprocess
+out = subprocess.check_output(["objdump", "-T", str(lib)], text=True, stderr=subprocess.DEVNULL)
+vers = sorted({line.split()[-2] for line in out.splitlines() if "GLIBC_" in line and "*UND*" in line})
+print("glibc deps:", ", ".join(vers) if vers else "(none)")
 PY
 
 echo

@@ -35,6 +35,9 @@ static int g_dw, g_dh, g_rw, g_rh;
 static float g_scale;
 static int g_ready;
 static int g_logged;
+/* Last real glfw framebuffer size (window pixels), before we lie render size. */
+static int g_fb_w;
+static int g_fb_h;
 
 static GlViewportFn real_glViewport;
 static GlScissorFn real_glScissor;
@@ -77,6 +80,15 @@ static void remap_rect(GLint* x, GLint* y, GLsizei* w, GLsizei* h) {
     const GLint oy = y ? *y : 0;
     const GLsizei ow = *w, oh = *h;
 
+    /* Already at render size — never shrink twice (640→320 with scale=2). */
+    if (g_rw > 0 && g_rh > 0 && *w >= g_rw - 1 && *w <= g_rw + 1 && *h >= g_rh - 1 &&
+        *h <= g_rh + 1)
+        return;
+
+    /* Zink's color image follows the caps-shrunk swapchain (render size) while
+     * GLFW still reports the window. Remap full-window viewports down so we
+     * fill that image (and keep MangoHud inside it). Skipping this left a
+     * corner crop that FSR then upscaled into a postage stamp. */
     if (g_dw > 0 && g_dh > 0 && g_rw > 0 && g_rh > 0 && *w == g_dw && *h == g_dh && ox == 0 &&
         oy == 0) {
         if (x) *x = 0;
@@ -90,37 +102,47 @@ static void remap_rect(GLint* x, GLint* y, GLsizei* w, GLsizei* h) {
             *w = tw;
             *h = th;
         }
-    } else if (g_rw > 0 && g_rh > 0 && ox == 0 && oy == 0 && *w > g_rw && *h > g_rh) {
-        *w = g_rw;
-        *h = g_rh;
     }
 
     if (!g_logged && (*w != ow || *h != oh) && getenv("XFSR_VERBOSE")) {
         g_logged = 1;
-        fprintf(stderr, "[xfsr-gl] remap %dx%d → %dx%d\n", (int)ow, (int)oh, (int)*w, (int)*h);
+        fprintf(stderr, "[xfsr-gl] remap %dx%d → %dx%d (glfw_fb=%dx%d)\n", (int)ow, (int)oh,
+                (int)*w, (int)*h, g_fb_w, g_fb_h);
     }
 }
 
-/* Resolve the *next* ICD/Mesa symbol — never our own interpose (avoids recursion). */
+typedef void* (*DlsymFn)(void*, const char*);
+typedef void* (*DlvsymFn)(void*, const char*, const char*);
+static DlsymFn real_dlsym;
+static void ensure_dlsym(void);
+
+/* libc/next dlsym — never our interposed symbol (same-DSO bind would recurse). */
+static void* libc_dlsym(void* handle, const char* name) {
+    ensure_dlsym();
+    if (!real_dlsym) return NULL;
+    return real_dlsym(handle, name);
+}
+
 static void* resolve_next(const char* name, void* self) {
-    void* p = dlsym(RTLD_NEXT, name);
+    /* Prefer the next LD_PRELOAD (MangoHud_shim) so SwapBuffers / GetProc stay chained. */
+    void* p = libc_dlsym(RTLD_NEXT, name);
     if (p && p != self) return p;
     void* gl = dlopen("libGL.so.1", RTLD_LAZY | RTLD_NOLOAD);
     if (!gl) gl = dlopen("libGL.so.1", RTLD_LAZY);
     if (gl) {
-        p = dlsym(gl, name);
+        p = libc_dlsym(gl, name);
         if (p && p != self) return p;
     }
     void* glx = dlopen("libGLX.so.0", RTLD_LAZY | RTLD_NOLOAD);
     if (!glx) glx = dlopen("libGLX.so.0", RTLD_LAZY);
     if (glx) {
-        p = dlsym(glx, name);
+        p = libc_dlsym(glx, name);
         if (p && p != self) return p;
     }
     void* egl = dlopen("libEGL.so.1", RTLD_LAZY | RTLD_NOLOAD);
     if (!egl) egl = dlopen("libEGL.so.1", RTLD_LAZY);
     if (egl) {
-        p = dlsym(egl, name);
+        p = libc_dlsym(egl, name);
         if (p && p != self) return p;
     }
     return NULL;
@@ -244,11 +266,16 @@ XFSR_EXPORT void glfwGetFramebufferSize(void* window, int* width, int* height) {
     if (!real) return;
     real(window, width, height);
     if (!width || !height) return;
-    GLint x = 0, y = 0;
-    GLsizei w = *width, h = *height;
-    remap_rect(&x, &y, &w, &h);
-    *width = w;
-    *height = h;
+    g_fb_w = *width;
+    g_fb_h = *height;
+    load_extents();
+    /* Report render size when the window is at display size so the app's
+     * glViewport matches Zink's caps-shrunk color image (and MangoHud). */
+    if (g_dw > 0 && g_dh > 0 && g_rw > 0 && g_rh > 0 && *width >= g_dw - 1 &&
+        *width <= g_dw + 1 && *height >= g_dh - 1 && *height <= g_dh + 1) {
+        *width = g_rw;
+        *height = g_rh;
+    }
 }
 
 XFSR_EXPORT void glfwGetWindowSize(void* window, int* width, int* height) {
@@ -257,12 +284,7 @@ XFSR_EXPORT void glfwGetWindowSize(void* window, int* width, int* height) {
     if (!real) real = (Fn)resolve_next("glfwGetWindowSize", (void*)glfwGetWindowSize);
     if (!real) return;
     real(window, width, height);
-    if (!width || !height) return;
-    GLint x = 0, y = 0;
-    GLsizei w = *width, h = *height;
-    remap_rect(&x, &y, &w, &h);
-    *width = w;
-    *height = h;
+    /* Keep window size as the real window — only framebuffer size is remapped. */
 }
 
 static void* wrap_proc(const char* name, void* real) {
@@ -299,11 +321,6 @@ static void* wrap_proc(const char* name, void* real) {
     }
     return real;
 }
-
-typedef void* (*DlsymFn)(void*, const char*);
-typedef void* (*DlvsymFn)(void*, const char*, const char*);
-
-static DlsymFn real_dlsym;
 
 static void ensure_dlsym(void) {
     if (real_dlsym) return;
