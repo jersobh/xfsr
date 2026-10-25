@@ -55,6 +55,8 @@ struct FrameTransfer {
     uint32_t bytesPerPixel = 4;
     int produceIndex = 0;
     int framesProduced = 0;
+    // OffloadRoundTrip: newest back-haul slot uploaded to the dGPU (-1 = pipe empty).
+    int roundTripReady = -1;
 
     void init(DeviceContext* src, DeviceContext* dst);
     void resize(uint32_t w, uint32_t h, VkFormat fmt = VK_FORMAT_R8G8B8A8_UNORM,

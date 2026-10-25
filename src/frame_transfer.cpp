@@ -411,6 +411,7 @@ void FrameTransfer::resetPipeline() {
     if (dstCtx) dstCtx->waitIdle();
     produceIndex = 0;
     framesProduced = 0;
+    roundTripReady = -1;
     for (int i = 0; i < kSlots; ++i) slots[i].pendingUpload = false;
 }
 
@@ -691,8 +692,13 @@ void FrameTransfer::recordDownload(VkCommandBuffer cmd, const GpuImage& srcOptim
 void FrameTransfer::recordUpload(VkCommandBuffer cmd, int slot) {
     dstCtx->loadDispatch();
     Slot& s = slots[slot % kSlots];
+    // WAR vs the previous reader of this slot (present blit / FSR sample) — TOP_OF_PIPE
+    // gave no execution dependency. Deliberately not ALL_COMMANDS: the dGPU upload
+    // should still overlap unrelated app rendering on the shared queue.
     transitionImage(dstCtx, cmd, s.dstOptimal.image, VK_IMAGE_LAYOUT_UNDEFINED,
-                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+                        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                     VK_PIPELINE_STAGE_TRANSFER_BIT, 0, VK_ACCESS_TRANSFER_WRITE_BIT);
     if (usesGpuBuffer()) {
         copyBufferToImage(dstCtx, cmd, s.dstBuf, s.dstOptimal.image, width, height);

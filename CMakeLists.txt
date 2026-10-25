@@ -138,6 +138,7 @@ set(XFSR_CORE_SOURCES
   src/frame_transfer.cpp
   src/fsr_pass.cpp
   src/gpu_image.cpp
+  src/offload_roundtrip.cpp
   src/present.cpp
 )
 

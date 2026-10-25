@@ -42,6 +42,8 @@ ONE_WAY_CLI=0
 RCAS="${XFSR_RCAS:-${CROSSVULKAN_RCAS:-1}}"
 # In-game hotkeys + status overlay (default on). XFSR_HUD=0 / --no-controls to disable.
 HUD="${XFSR_HUD:-1}"
+# Pin status strip at launch (Proton often eats F10). XFSR_OVERLAY=1 / --overlay.
+OVERLAY="${XFSR_OVERLAY:-0}"
 
 if [[ "${XFSR_MANGOHUD:-0}" == "1" ]]; then
   USE_MANGOHUD=1
@@ -65,17 +67,20 @@ Options:
   --offload / --no-offload                dual-GPU: dGPU render + iGPU FSR (off by default;
                                           use for hybrid NVIDIA+AMD max throughput;
                                           can still stress some Proton titles — try without if unstable)
-  --one-way / --no-one-way                with --offload: prefer iGPU present or force
-                                          round-trip; implies --offload. On NVIDIA, --one-way
-                                          is ignored (SIGSEGV); XFSR_IGPU_PRESENT=force to try.
+  --one-way / --no-one-way                with --offload: iGPU present (default when
+                                          offloading) or force round-trip. --one-way implies
+                                          --offload and skips MangoHud (uses the xfsr overlay).
   --rcas / --no-rcas                      FSR1 sharpening pass (default: on; --no-rcas = EASU only)
   --controls / --no-controls              In-game hotkeys + status toast (default: on)
                                           F1 preset, F2 RCAS, F3 FSR, F4 offload, F5 one-way,
                                           F10 pin (XFSR_HUD_MOD=1 → require Shift). Control:
                                           echo 'offload 1' > \$XDG_RUNTIME_DIR/xfsr-control
+  --overlay / --no-overlay                Pin status strip at launch (XFSR_OVERLAY=1). Useful
+                                          for Proton when F10 is eaten by the game/Steam.
   --zink / --no-zink                      Mesa Zink for OpenGL→Vulkan (default: auto —
                                           on for glmark2/native GL, off for Proton/Vulkan)
-  --mangohud / --hud                      FPS/frametime overlay (GL preload and/or Vulkan layer)
+  --mangohud / --hud                      FPS overlay. Skipped on one-way (opaque WSI crash);
+                                          the xfsr overlay shows FPS/CPU/GPU instead.
   --igpu                                  Prefer iGPU ICD (default: prefer dGPU)
   --layer-dir DIR                         directory with VkLayer_XFSR.json
   --print                                 print env / command, then exit
@@ -128,6 +133,8 @@ while [[ $# -gt 0 ]]; do
     --no-rcas) RCAS=0; shift ;;
     --controls) HUD=1; shift ;;
     --no-controls) HUD=0; shift ;;
+    --overlay) OVERLAY=1; shift ;;
+    --no-overlay) OVERLAY=0; shift ;;
     --layer-dir)
       LAYER_DIR="${2:?}"; shift 2 ;;
     --layer-dir=*) LAYER_DIR="${1#*=}"; shift ;;
@@ -273,6 +280,7 @@ find_mangohud_opengl() {
 run_with_hud() {
   if [[ $USE_MANGOHUD -eq 1 ]]; then
     export MANGOHUD=1
+    export XFSR_MANGOHUD=1
     if [[ $USE_ZINK -eq 1 ]]; then
       # Zink presents through our Vulkan layer. A GL MangoHud (SwapBuffers) paints
       # Zink's GL surface which XFSR never samples — HUD vanishes after FSR.
@@ -328,13 +336,18 @@ RENDER_W="$(awk -v w="$OUT_W" -v s="$SCALE" 'BEGIN{printf "%d", w/s+0.5}')"
 RENDER_H="$(awk -v h="$OUT_H" -v s="$SCALE" 'BEGIN{printf "%d", h/s+0.5}')"
 RENDER_W=$(( RENDER_W < 64 ? 64 : RENDER_W ))
 RENDER_H=$(( RENDER_H < 64 ? 64 : RENDER_H ))
-if [[ "$OUT_W" == "1920" && "$OUT_H" == "1080" ]]; then
-  case "$PRESET" in
-    ultra|U|extreme) RENDER_W=768; RENDER_H=432 ;;
-    performance|perf|E) RENDER_W=960; RENDER_H=540 ;;
-    balanced|W) RENDER_W=1129; RENDER_H=635 ;;
-    *) RENDER_W=1280; RENDER_H=720 ;;
-  esac
+
+# One-way iGPU present uses an opaque app swapchain. MangoHud caches that handle
+# and SIGSEGVs. Drop it and pin the xfsr HUD (FPS / CPU / GPU).
+# Default when --offload without --no-one-way: layer prefers one-way.
+if [[ $OFFLOAD -eq 1 && "$ONE_WAY" != "0" ]]; then
+  if [[ $USE_MANGOHUD -eq 1 ]]; then
+    echo "xfsr-run: one-way present skips MangoHud (opaque swapchain SIGSEGV). Using xfsr overlay." >&2
+  fi
+  USE_MANGOHUD=0
+  export MANGOHUD=0
+  unset XFSR_MANGOHUD 2>/dev/null || true
+  OVERLAY=1
 fi
 
 require_mangohud
@@ -399,6 +412,31 @@ export XFSR_PRESET="$PRESET"
 export XFSR_OFFLOAD="$OFFLOAD"
 export XFSR_RCAS="$RCAS"
 export XFSR_HUD="$HUD"
+export XFSR_OVERLAY="$OVERLAY"
+# Keep MangoHud's implicit layer out of one-way processes (ambient MANGOHUD=1).
+if [[ $OFFLOAD -eq 1 && "$ONE_WAY" != "0" ]]; then
+  export MANGOHUD=0
+  unset XFSR_MANGOHUD 2>/dev/null || true
+  _mh_dis="VK_LAYER_MANGOHUD_overlay_x86_64,VK_LAYER_MANGOHUD_overlay_x86"
+  if [[ -n "${VK_LOADER_LAYERS_DISABLE:-}" ]]; then
+    export VK_LOADER_LAYERS_DISABLE="${VK_LOADER_LAYERS_DISABLE},${_mh_dis}"
+  else
+    export VK_LOADER_LAYERS_DISABLE="${_mh_dis}"
+  fi
+  unset _mh_dis
+  if [[ -n "${LD_PRELOAD:-}" ]]; then
+    _cleaned=""
+    IFS=':' read -r -a _lp <<<"$LD_PRELOAD"
+    for _part in "${_lp[@]}"; do
+      case "$_part" in
+        *MangoHud*|*mangohud*) continue ;;
+      esac
+      _cleaned="${_cleaned:+$_cleaned:}$_part"
+    done
+    export LD_PRELOAD="$_cleaned"
+    unset _cleaned _part _lp
+  fi
+fi
 # Do NOT inherit ambient XFSR_IGPU_PRESENT=force from the shell — that silently
 # enables one-way + offload and SIGSEGVs with MangoHud on NVIDIA.
 if [[ $ONE_WAY_CLI -eq 1 ]]; then
@@ -427,6 +465,9 @@ if [[ -n "${XFSR_IGPU_PRESENT:-}" ]]; then
 fi
 echo "xfsr-run: layer ${LAYER_DIR} (ENABLE_XFSR=1 preset=$PRESET scale=$SCALE offload=$OFFLOAD${_ow_msg})" >&2
 unset _ow_msg
+if [[ $OFFLOAD -eq 1 && $PREFER_DGPU -eq 0 ]]; then
+  echo "xfsr-run: warning: --igpu + --offload — app on integrated GPU; layer will skip dual-GPU and use same-GPU FSR. Drop --igpu for dGPU render → iGPU FSR." >&2
+fi
 
 if [[ $USE_ZINK -eq 1 ]]; then
   export MESA_LOADER_DRIVER_OVERRIDE=zink

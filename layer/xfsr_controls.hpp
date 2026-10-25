@@ -25,8 +25,11 @@ struct Snapshot {
     bool reconfigureOffload = false;
     // One-shot: clear forceRoundTripOffload / igpuFailed so one-way can retry.
     bool retryOffload = false;
-    char status[192]{};
+    char status[384]{};
 };
+
+// Count a presented frame for the overlay FPS (proxy and identity).
+void notePresented();
 
 // Call once from CreateInstance (or lazily). Safe to call repeatedly.
 void initFromEnv();
@@ -61,7 +64,7 @@ struct OverlayGpu {
     void* stagingMapped = nullptr;
     uint32_t width = 0;
     uint32_t height = 0;
-    char lastText[192]{};
+    char lastText[384]{};
 };
 
 void destroyOverlay(OverlayGpu* ov);

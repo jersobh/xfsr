@@ -9,6 +9,7 @@
 #include <sys/ioctl.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -21,6 +22,9 @@
 #include <vector>
 
 namespace xfsr_ctrl {
+
+std::atomic<uint64_t> g_presentFrames{0};
+
 namespace {
 
 // --- 8×8 ASCII font (32..127), same glyph set as demo HudOverlay ---
@@ -223,12 +227,156 @@ int presetIndexFromScale(float s) {
     return best;
 }
 
+struct HudMetrics {
+    double fps = 0;
+    int cpu = -1;
+    int gpuPct[2] = {-1, -1};
+    int gpuC[2] = {-1, -1};
+    char gpuTag[2][8] = {{0}, {0}};
+    char busyPath[2][320] = {{0}, {0}};
+    char tempPath[2][512] = {{0}, {0}};
+    int gpuN = 0;
+};
+
+HudMetrics g_metrics;
+uint64_t g_presentMark = 0;
+std::chrono::steady_clock::time_point g_metricAt{};
+bool g_metricInited = false;
+
+int readSysInt(const char* path) {
+    FILE* f = std::fopen(path, "r");
+    if (!f) return -1;
+    int v = -1;
+    if (std::fscanf(f, "%d", &v) != 1) v = -1;
+    std::fclose(f);
+    return v;
+}
+
+void discoverGpus() {
+    if (g_metrics.gpuN > 0) return;
+    DIR* dir = opendir("/sys/class/drm");
+    if (!dir) return;
+    while (g_metrics.gpuN < 2) {
+        dirent* ent = readdir(dir);
+        if (!ent) break;
+        const char* name = ent->d_name;
+        if (std::strncmp(name, "card", 4) != 0) continue;
+        if (std::strchr(name, '-')) continue;
+        char vendorPath[320];
+        std::snprintf(vendorPath, sizeof(vendorPath), "/sys/class/drm/%s/device/vendor", name);
+        FILE* vf = std::fopen(vendorPath, "r");
+        unsigned vendor = 0;
+        if (!vf) continue;
+        if (std::fscanf(vf, "%x", &vendor) != 1) vendor = 0;
+        std::fclose(vf);
+        const int i = g_metrics.gpuN;
+        if (vendor == 0x10deu)
+            std::snprintf(g_metrics.gpuTag[i], sizeof(g_metrics.gpuTag[i]), "NV");
+        else if (vendor == 0x1002u)
+            std::snprintf(g_metrics.gpuTag[i], sizeof(g_metrics.gpuTag[i]), "AMD");
+        else
+            std::snprintf(g_metrics.gpuTag[i], sizeof(g_metrics.gpuTag[i]), "GPU");
+        std::snprintf(g_metrics.busyPath[i], sizeof(g_metrics.busyPath[i]),
+                      "/sys/class/drm/%s/device/gpu_busy_percent", name);
+        g_metrics.gpuPct[i] = readSysInt(g_metrics.busyPath[i]);
+        char hwmon[384];
+        std::snprintf(hwmon, sizeof(hwmon), "/sys/class/drm/%s/device/hwmon", name);
+        DIR* hd = opendir(hwmon);
+        if (hd) {
+            while (dirent* he = readdir(hd)) {
+                if (he->d_name[0] == '.') continue;
+                char tp[512];
+                std::snprintf(tp, sizeof(tp), "%s/%s/temp1_input", hwmon, he->d_name);
+                const int milli = readSysInt(tp);
+                if (milli > 0) {
+                    std::snprintf(g_metrics.tempPath[i], sizeof(g_metrics.tempPath[i]), "%s", tp);
+                    g_metrics.gpuC[i] = milli / 1000;
+                    break;
+                }
+            }
+            closedir(hd);
+        }
+        ++g_metrics.gpuN;
+    }
+    closedir(dir);
+}
+
+int sampleCpuPercent() {
+    static unsigned long long prevIdle = 0, prevTotal = 0;
+    static bool have = false;
+    FILE* f = std::fopen("/proc/stat", "r");
+    if (!f) return -1;
+    char label[16];
+    unsigned long long user = 0, nice = 0, sys = 0, idle = 0, iow = 0, irq = 0, sirq = 0;
+    const int n = std::fscanf(f, "%15s %llu %llu %llu %llu %llu %llu %llu", label, &user, &nice,
+                               &sys, &idle, &iow, &irq, &sirq);
+    std::fclose(f);
+    if (n < 5) return -1;
+    const unsigned long long idleAll = idle + iow;
+    const unsigned long long total = user + nice + sys + idle + iow + irq + sirq;
+    int pct = -1;
+    if (have && total > prevTotal) {
+        const unsigned long long dTot = total - prevTotal;
+        const unsigned long long dIdle = idleAll - prevIdle;
+        if (dTot > 0) pct = static_cast<int>((dTot - dIdle) * 100ull / dTot);
+    }
+    prevIdle = idleAll;
+    prevTotal = total;
+    have = true;
+    return pct;
+}
+
+void sampleMetricsLocked() {
+    const auto now = std::chrono::steady_clock::now();
+    if (!g_metricInited) {
+        g_metricInited = true;
+        g_metricAt = now;
+        g_presentMark = g_presentFrames.load(std::memory_order_relaxed);
+        discoverGpus();
+        return;
+    }
+    const double dt = std::chrono::duration<double>(now - g_metricAt).count();
+    if (dt < 0.5) return;
+    const uint64_t frames = g_presentFrames.load(std::memory_order_relaxed);
+    g_metrics.fps = static_cast<double>(frames - g_presentMark) / dt;
+    g_presentMark = frames;
+    g_metricAt = now;
+    g_metrics.cpu = sampleCpuPercent();
+    for (int i = 0; i < g_metrics.gpuN; ++i) {
+        if (g_metrics.busyPath[i][0]) {
+            const int pct = readSysInt(g_metrics.busyPath[i]);
+            if (pct >= 0) g_metrics.gpuPct[i] = pct;
+        }
+        if (g_metrics.tempPath[i][0]) {
+            const int milli = readSysInt(g_metrics.tempPath[i]);
+            if (milli > 0) g_metrics.gpuC[i] = milli / 1000;
+        }
+    }
+}
+
+void appendGpu(char* out, size_t n, int i) {
+    char piece[64];
+    if (g_metrics.gpuPct[i] >= 0 && g_metrics.gpuC[i] >= 0)
+        std::snprintf(piece, sizeof(piece), " %s %d%% %dC", g_metrics.gpuTag[i],
+                      g_metrics.gpuPct[i], g_metrics.gpuC[i]);
+    else if (g_metrics.gpuPct[i] >= 0)
+        std::snprintf(piece, sizeof(piece), " %s %d%%", g_metrics.gpuTag[i], g_metrics.gpuPct[i]);
+    else if (g_metrics.gpuC[i] >= 0)
+        std::snprintf(piece, sizeof(piece), " %s %dC", g_metrics.gpuTag[i], g_metrics.gpuC[i]);
+    else
+        return;
+    std::strncat(out, piece, n - std::strlen(out) - 1);
+}
+
 void formatStatusLocked(char* out, size_t n) {
-    std::snprintf(out, n,
-                  "xfsr %s %.2fx FSR:%s RCAS:%s off:%s 1way:%s [F1-F5 F10]",
+    sampleMetricsLocked();
+    char cpu[16] = "--";
+    if (g_metrics.cpu >= 0) std::snprintf(cpu, sizeof(cpu), "%d%%", g_metrics.cpu);
+    std::snprintf(out, n, "xfsr %s %.2fx FSR:%s RCAS:%s off:%s 1way:%s\nFPS %.0f  CPU %s",
                   kPresetNames[g_rt.presetIdx], g_rt.scale, g_rt.fsr ? "on" : "off",
                   g_rt.rcas ? "on" : "off", g_rt.offload ? "on" : "off",
-                  g_rt.oneWay ? "on" : "off");
+                  g_rt.oneWay ? "on" : "off", g_metrics.fps, cpu);
+    for (int i = 0; i < g_metrics.gpuN; ++i) appendGpu(out, n, i);
 }
 
 void armToastLocked(const char* msg) {
@@ -628,7 +776,7 @@ void ensureOverlayGpu(OverlayGpu* ov, DeviceContext* ctx, uint32_t w, uint32_t h
 void rasterizeText(uint8_t* pixels, uint32_t width, uint32_t height, const char* text) {
     const size_t n = static_cast<size_t>(width) * height * 4u;
     std::memset(pixels, 0, n);
-    const int panelH = std::min(static_cast<int>(height), 40);
+    const int panelH = static_cast<int>(height);
     for (int y = 0; y < panelH; ++y) {
         for (uint32_t x = 0; x < width; ++x) {
             uint8_t* p = pixels + (static_cast<size_t>(y) * width + x) * 4;
@@ -699,6 +847,10 @@ void transition(DeviceContext* ctx, VkCommandBuffer cmd, VkImage image, VkImageL
 
 } // namespace
 
+void notePresented() {
+    g_presentFrames.fetch_add(1, std::memory_order_relaxed);
+}
+
 void initFromEnv() {
     std::lock_guard<std::mutex> lock(g_rt.mu);
     if (g_rt.inited) return;
@@ -712,6 +864,11 @@ void initFromEnv() {
     // Default: bare F-keys (no modifier). XFSR_HUD_MOD=1 requires Shift+F*.
     const char* mod = std::getenv("XFSR_HUD_MOD");
     g_rt.requireMod = (mod && mod[0] != '\0' && mod[0] != '0');
+
+    // Pin status strip at launch (Proton/Steam often eat F10). XFSR_OVERLAY=1 / --overlay.
+    const char* ov = std::getenv("XFSR_OVERLAY");
+    if (!ov) ov = std::getenv("CROSSVULKAN_OVERLAY");
+    if (ov && ov[0] && ov[0] != '0') g_rt.overlayPinned = true;
 
     const char* preset = std::getenv("XFSR_PRESET");
     if (!preset || !preset[0]) preset = std::getenv("CROSSVULKAN_PRESET_MODE");
@@ -774,7 +931,7 @@ void initFromEnv() {
         g_rt.oneWay = true;
         if (!offloadExplicitOff) g_rt.offload = true;
     } else {
-        // Layer default: prefer one-way when offload is on (NVIDIA still gated).
+        // Layer default: prefer one-way when offload is on (any vendor; MangoHud still gates).
         g_rt.oneWay = g_rt.offload;
     }
 
@@ -792,9 +949,10 @@ void initFromEnv() {
 
     if (g_rt.hudOn) {
         std::fprintf(stderr,
-                     "[xfsr] controls on: F1 preset F2 RCAS F3 FSR F4 offload F5 one-way F10 pin%s\n"
+                     "[xfsr] controls on: F1 preset F2 RCAS F3 FSR F4 offload F5 one-way F10 pin%s%s\n"
                      "[xfsr] control file: %s  (preset|rcas|fsr|offload|one-way|overlay|status)\n",
-                     g_rt.requireMod ? " (hold Shift)" : "", g_rt.controlPath);
+                     g_rt.requireMod ? " (hold Shift)" : "",
+                     g_rt.overlayPinned ? " [overlay pinned]" : "", g_rt.controlPath);
         // Touch the control file so the path always exists for scripting.
         std::ofstream touch(g_rt.controlPath, std::ios::app);
     }
@@ -912,8 +1070,8 @@ bool recordOverlay(OverlayGpu* ov, DeviceContext* ctx, VkCommandBuffer cmd, VkIm
     if (!ov || !ctx || !cmd || !swapImage || !text || !text[0]) return false;
     if (swapW < 64 || swapH < 32) return false;
 
-    constexpr uint32_t kOw = 900;
-    constexpr uint32_t kOh = 40;
+    constexpr uint32_t kOw = 1600;
+    constexpr uint32_t kOh = 72;
     ensureOverlayGpu(ov, ctx, kOw, kOh);
     if (!ov->stagingMapped || !ov->image.image) return false;
 

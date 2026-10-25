@@ -5,6 +5,38 @@ All notable changes to **xfsr** / **xfsr-run** are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] — 2026-10-25
+
+### Added
+
+- One-way offload skips MangoHud and pins the xfsr overlay with FPS, CPU%, GPU%
+  and temperatures (sysfs). Native Vulkan may present on the iGPU; Zink stays on
+  round-trip (NVIDIA calls present with the app swapchain — opaque handles SIGSEGV)
+- Uniform render size: `window / scale` for Vulkan, DXVK, and Zink (windowed and
+  fullscreen). No special-case 1080p table that ignored smaller windows
+- Docs: 32-bit Proton titles (CoD4) need `PROTON_USE_WOW64=1` so 64-bit DXVK loads
+  the layer; borderless + lower in-game res for D3D9 FSR
+
+### Fixed
+
+- CoD4 / D3D9: do not return proxy images smaller than CreateSwapchain extent
+  (DEVICE_LOST after first present); identity + hint when the game ignores caps
+- Caps advertise `currentExtent=UINT_MAX` + `max=render` for DXVK; Zink uses a
+  concrete `currentExtent=render` (UINT_MAX made Mesa OOM / stay identity)
+- Hook `vkGetPhysicalDeviceSurfaceCapabilities2KHR` (DXVK prefers this)
+- FSR proxy + caps shrink on integrated GPUs (`discrete=0`, e.g. Vega)
+- Identity / exclusive-fullscreen F10 overlay (CoD4): adopt app device, preserve
+  `PRESENT_SRC` frame contents, reset overlay sync on DestroyDevice
+- Zink X11: publish `XFSR_GL_REMAP` so the shim remaps viewports when EGL still
+  reports the window size (zoomed bottom-left crop)
+- Skip futile shrink-kick when D3D9 already ignored the caps clamp
+
+### Changed
+
+- `--offload` without `--no-one-way` prefers one-way and does not load MangoHud
+- `xfsr-run --one-way` / offload docs: round-trip is `--no-one-way`; Zink offload
+  is always round-trip on NVIDIA hybrids
+
 ## [0.4.0] — 2026-10-25
 
 ### Added
@@ -16,6 +48,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - Control file `$XDG_RUNTIME_DIR/xfsr-control` (or `XFSR_CONTROL`): `preset`,
   `rcas`, `fsr`, `offload`, `one-way`, `overlay`, `status`
 - **F4 live offload**: same-GPU ↔ round-trip without restart (keeps dGPU WSI)
+- `--overlay` / `XFSR_OVERLAY=1` — pin status strip at launch (Proton often eats F10)
 
 ### Fixed
 
@@ -32,6 +65,17 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - Bench `--fullscreen` / `--windowed` for VK and GL loaders
 - `xfsr-run` / `xfsr-bench`: prefer X11 for native Vulkan FSR when `DISPLAY` is
   set (Wayland `UINT_MAX` extent skipped shrink → flat FPS vs baseline)
+- `xfsr-bench`: full matrix — X11+Wayland × windowed+fullscreen, all presets,
+  offload±RCAS, VK+GL (`XFSR_BENCH_QUICK=1` / `XFSR_BENCH_X11_ONLY=1` /
+  `XFSR_BENCH_WAYLAND_ONLY=1` to narrow)
+- **Wayland Vulkan FSR**: seed window size from the first swapchain (ICD
+  `currentExtent` is `UINT_MAX`), kick one `OUT_OF_DATE`, clamp caps max to
+  render size so the recreate builds a real proxy (was identity @ full res)
+- **Wayland Zink/GL FSR**: shim shrinks `wl_egl_window` to render size (Zink
+  ignores Vulkan caps); layer treats matching create as hint-honored proxy
+- Offload+MangoHud SIGSEGV on Mesa one-way (opaque WSI): refuse one-way when
+  MangoHud is active; skip `--offload` when the app is already on the iGPU
+  (`--igpu` / Zink-on-Vega)
 
 ## [0.3.1] — 2026-10-24
 
@@ -142,6 +186,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - Dual-GPU `SURFACE_LOST` / early `OUT_OF_DATE` (opaque app handle + iGPU-only window WSI)
 - Caps-shrink vs Zink EGL drawable mismatch
 
+[0.5.0]: https://github.com/jersobh/xfsr/releases/tag/v0.5.0
+[0.4.0]: https://github.com/jersobh/xfsr/releases/tag/v0.4.0
 [0.3.1]: https://github.com/jersobh/xfsr/releases/tag/v0.3.1
 [0.3.0]: https://github.com/jersobh/xfsr/releases/tag/v0.3.0
 [0.2.4]: https://github.com/jersobh/xfsr/releases/tag/v0.2.4

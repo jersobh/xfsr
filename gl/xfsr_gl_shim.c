@@ -3,6 +3,10 @@
  * GL apps call glViewport(0,0, windowW, windowH) while caps-shrink made the
  * swapchain windowW/scale × windowH/scale. Remap full-window viewports/scissors.
  *
+ * Wayland: Zink sizes the Vulkan swapchain from wl_egl_window, ignoring Vulkan
+ * caps. Interpose wl_egl_window_create/resize to the render size so Zink asks
+ * for a shrunk swapchain; the layer presents at the real window (DISPLAY hint).
+ *
  * Must export interpose symbols (visibility default) — CMake builds with
  * -fvisibility=hidden. Also wrap glX/egl/glfw GetProcAddress so apps that
  * resolve GL via those (not the PLT) still get remapped viewports.
@@ -131,6 +135,20 @@ static int query_egl_drawable(int* out_w, int* out_h) {
     return 1;
 }
 
+/* Layer sets XFSR_GL_REMAP=WxH when a proxy is live (same process). EGL on X11
+ * Zink often still reports the window size while GetSwapchainImages are render-
+ * sized — without this we skip remap and show a zoomed bottom-left crop. */
+static int layer_remap_size(int* out_w, int* out_h) {
+    const char* e = getenv("XFSR_GL_REMAP");
+    if (!e || !*e) return 0;
+    int rw = 0, rh = 0;
+    if (sscanf(e, "%dx%d", &rw, &rh) != 2 && sscanf(e, "%d x %d", &rw, &rh) != 2) return 0;
+    if (rw < 64 || rh < 64) return 0;
+    *out_w = rw;
+    *out_h = rh;
+    return 1;
+}
+
 static void remap_rect(GLint* x, GLint* y, GLsizei* w, GLsizei* h) {
     load_extents();
     if (!w || !h) return;
@@ -150,8 +168,10 @@ static void remap_rect(GLint* x, GLint* y, GLsizei* w, GLsizei* h) {
      * postage-stamp in the corner of the new render image. */
     int dw = 0, dh = 0;
     const int have_egl = query_egl_drawable(&dw, &dh);
+    int layer_w = 0, layer_h = 0;
+    const int have_layer = layer_remap_size(&layer_w, &layer_h);
 
-    if (have_egl && win_w < 64) {
+    if ((have_egl || have_layer) && win_w < 64) {
         /* No glfw yet — if viewport looks like a window, use it as win. */
         if ((int)*w >= 200 && (int)*h >= 200) {
             win_w = (int)*w;
@@ -159,8 +179,40 @@ static void remap_rect(GLint* x, GLint* y, GLsizei* w, GLsizei* h) {
         }
     }
 
+    /* Prefer layer proxy size when EGL still looks window-sized (X11 Zink). */
+    if (have_layer && win_w >= 64 && win_h >= 64 &&
+        (layer_w + near < win_w || layer_h + near < win_h)) {
+        const int egl_is_window =
+            have_egl && abs(dw - win_w) <= near && abs(dh - win_h) <= near;
+        const int egl_is_render =
+            have_egl && abs(dw - layer_w) <= near && abs(dh - layer_h) <= near;
+        if (!have_egl || egl_is_window || egl_is_render) {
+            const int covers_win =
+                (abs((int)*w - win_w) <= near && abs((int)*h - win_h) <= near);
+            const int covers_display =
+                (g_dw > 0 && g_dh > 0 && abs((int)*w - g_dw) <= near &&
+                 abs((int)*h - g_dh) <= near);
+            const int covers_render =
+                (abs((int)*w - layer_w) <= near && abs((int)*h - layer_h) <= near) ||
+                ((int)*w + near >= layer_w && (int)*h + near >= layer_h);
+            if (covers_win || covers_display || covers_render) {
+                if (x) *x = 0;
+                if (y) *y = 0;
+                *w = layer_w;
+                *h = layer_h;
+                if (!g_logged && (*w != ow || *h != oh) && getenv("XFSR_VERBOSE")) {
+                    g_logged = 1;
+                    fprintf(stderr,
+                            "[xfsr-gl] remap %dx%d → layer %dx%d (egl=%dx%d win=%dx%d)\n",
+                            (int)ow, (int)oh, layer_w, layer_h, dw, dh, win_w, win_h);
+                }
+                return;
+            }
+        }
+    }
+
     if (have_egl && win_w >= 64 && win_h >= 64) {
-        /* Identity: drawable still window-sized → do not shrink. */
+        /* Identity: drawable still window-sized and no live proxy → do not shrink. */
         if (abs(dw - win_w) <= near && abs(dh - win_h) <= near) return;
 
         /* Caps-shrunk drawable: any viewport that covers the drawable or the
@@ -189,33 +241,6 @@ static void remap_rect(GLint* x, GLint* y, GLsizei* w, GLsizei* h) {
                 return;
             }
         }
-    }
-
-    /* Fallback without a reliable drawable: env scale / absolute render. */
-    if (win_w < 64) {
-        win_w = (int)*w;
-        win_h = (int)*h;
-    }
-    int tw = 0, th = 0;
-    target_render_size(win_w, win_h, &tw, &th);
-    if (tw <= 0 || th <= 0) return;
-    if (abs((int)*w - tw) <= 1 && abs((int)*h - th) <= 1) return;
-
-    const int is_window =
-        (abs((int)*w - win_w) <= near && abs((int)*h - win_h) <= near);
-    const int is_display =
-        (g_dw > 0 && g_dh > 0 && abs((int)*w - g_dw) <= near && abs((int)*h - g_dh) <= near);
-    if (!is_window && !is_display) return;
-
-    if (x) *x = 0;
-    if (y) *y = 0;
-    *w = tw;
-    *h = th;
-
-    if (!g_logged && (*w != ow || *h != oh) && getenv("XFSR_VERBOSE")) {
-        g_logged = 1;
-        fprintf(stderr, "[xfsr-gl] remap %dx%d → %dx%d (scale fallback win=%dx%d)\n", (int)ow,
-                (int)oh, (int)*w, (int)*h, win_w, win_h);
     }
 }
 
@@ -378,8 +403,14 @@ XFSR_EXPORT void glfwGetFramebufferSize(void* window, int* width, int* height) {
     g_fb_w = *width;
     g_fb_h = *height;
     load_extents();
-    /* Lie the current Zink drawable size (follows F1 recreate). Do not use
-     * latched XFSR_SCALE — that desyncs after preset changes. */
+    /* Lie render size so apps that size from glfwGetFramebufferSize match the
+     * proxy color image. Prefer layer remap (X11 EGL often stays window-sized). */
+    int lw = 0, lh = 0;
+    if (layer_remap_size(&lw, &lh) && lw + 2 < g_fb_w && lh + 2 < g_fb_h) {
+        *width = lw;
+        *height = lh;
+        return;
+    }
     int dw = 0, dh = 0;
     if (!query_egl_drawable(&dw, &dh)) return;
     if (abs(dw - g_fb_w) <= 2 && abs(dh - g_fb_h) <= 2) return; /* identity */
@@ -398,6 +429,83 @@ XFSR_EXPORT void glfwGetWindowSize(void* window, int* width, int* height) {
     /* Keep window size as the real window — only framebuffer size is remapped. */
 }
 
+/* Publish window size for the Vulkan layer (CreateSwapchain display hint) without
+ * clobbering values xfsr-run already exported. */
+static void publish_window_hint(int win_w, int win_h, int rw, int rh) {
+    char buf[32];
+    if (win_w >= 64 && win_h >= 64) {
+        g_fb_w = win_w;
+        g_fb_h = win_h;
+        if (!getenv("XFSR_DISPLAY_W") || !getenv("XFSR_DISPLAY_H")) {
+            snprintf(buf, sizeof(buf), "%d", win_w);
+            setenv("XFSR_DISPLAY_W", buf, 0);
+            snprintf(buf, sizeof(buf), "%d", win_h);
+            setenv("XFSR_DISPLAY_H", buf, 0);
+            snprintf(buf, sizeof(buf), "%dx%d", win_w, win_h);
+            setenv("XFSR_DISPLAY_EXTENT", buf, 0);
+        }
+    }
+    if (rw >= 64 && rh >= 64 && (!getenv("XFSR_RENDER_W") || !getenv("XFSR_RENDER_H"))) {
+        snprintf(buf, sizeof(buf), "%d", rw);
+        setenv("XFSR_RENDER_W", buf, 0);
+        snprintf(buf, sizeof(buf), "%d", rh);
+        setenv("XFSR_RENDER_H", buf, 0);
+    }
+}
+
+static int shrink_wl_size(int* width, int* height) {
+    if (!width || !height) return 0;
+    const int win_w = *width, win_h = *height;
+    if (win_w < 64 || win_h < 64) return 0;
+    load_extents();
+    int rw = 0, rh = 0;
+    target_render_size(win_w, win_h, &rw, &rh);
+    if (rw <= 0 || rh <= 0) return 0;
+    if (rw >= win_w && rh >= win_h) return 0;
+    publish_window_hint(win_w, win_h, rw, rh);
+    *width = rw;
+    *height = rh;
+    if (getenv("XFSR_VERBOSE")) {
+        fprintf(stderr, "[xfsr-gl] wl_egl_window %dx%d → render %dx%d (Wayland Zink shrink)\n",
+                win_w, win_h, rw, rh);
+    }
+    return 1;
+}
+
+typedef struct wl_egl_window WlEglWindow;
+typedef struct wl_surface WlSurface;
+typedef WlEglWindow* (*WlEglCreateFn)(WlSurface*, int, int);
+typedef void (*WlEglResizeFn)(WlEglWindow*, int, int, int, int);
+
+static void* wayland_egl_sym(const char* name, void* self) {
+    void* p = resolve_next(name, self);
+    if (p && p != self) return p;
+    void* so = dlopen("libwayland-egl.so.1", RTLD_LAZY | RTLD_NOLOAD);
+    if (!so) so = dlopen("libwayland-egl.so.1", RTLD_LAZY);
+    if (!so) return NULL;
+    p = libc_dlsym(so, name);
+    return (p && p != self) ? p : NULL;
+}
+
+XFSR_EXPORT WlEglWindow* wl_egl_window_create(WlSurface* surface, int width, int height) {
+    static WlEglCreateFn real = NULL;
+    if (!real)
+        real = (WlEglCreateFn)wayland_egl_sym("wl_egl_window_create", (void*)wl_egl_window_create);
+    if (!real) return NULL;
+    shrink_wl_size(&width, &height);
+    return real(surface, width, height);
+}
+
+XFSR_EXPORT void wl_egl_window_resize(WlEglWindow* egl_window, int width, int height, int dx,
+                                      int dy) {
+    static WlEglResizeFn real = NULL;
+    if (!real)
+        real = (WlEglResizeFn)wayland_egl_sym("wl_egl_window_resize", (void*)wl_egl_window_resize);
+    if (!real) return;
+    shrink_wl_size(&width, &height);
+    real(egl_window, width, height, dx, dy);
+}
+
 static void* wrap_proc(const char* name, void* real) {
     if (!name) return real;
     /* glmark2 dlopens libGL and dlsyms these by name — LD_PRELOAD alone never sees them. */
@@ -405,6 +513,8 @@ static void* wrap_proc(const char* name, void* real) {
     if (strcmp(name, "glXGetProcAddressARB") == 0) return (void*)glXGetProcAddressARB;
     if (strcmp(name, "eglGetProcAddress") == 0) return (void*)eglGetProcAddress;
     if (strcmp(name, "glfwGetProcAddress") == 0) return (void*)glfwGetProcAddress;
+    if (strcmp(name, "wl_egl_window_create") == 0) return (void*)wl_egl_window_create;
+    if (strcmp(name, "wl_egl_window_resize") == 0) return (void*)wl_egl_window_resize;
     if (!real) return real;
     if (strcmp(name, "glViewport") == 0) {
         stash_if_real((void**)&real_glViewport, real, (void*)glViewport);

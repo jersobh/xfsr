@@ -1,0 +1,15 @@
+provider: gemini
+model: gemini-3.8-flash
+embedding_provider: gemini
+embedding_model: gemini-embedding-2
+vector_dim: 3072
+
+agents:
+  architect_planner:
+    model: gemini-3.8-flash
+  software_engineer:
+    model: gemini-3.8-flash
+  code_reviewer:
+    model: gemini-3.5-flash-lite
+  diagnostics_tester:
+    model: gemini-3.5-flash-lite

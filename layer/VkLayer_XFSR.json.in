@@ -5,8 +5,8 @@
     "type": "GLOBAL",
     "library_path": "@LAYER_LIB_PATH@",
     "api_version": "1.3.0",
-    "implementation_version": "1",
-    "description": "xfsr dual-GPU FSR1 offload (dGPU render → shared host → iGPU FSR → present)",
+    "implementation_version": "5",
+    "description": "xfsr FSR1 (same-GPU or dGPU render → iGPU FSR/present)",
     "functions": {
       "vkNegotiateLoaderLayerInterfaceVersion": "vkNegotiateLoaderLayerInterfaceVersion"
     },
