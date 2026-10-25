@@ -5,6 +5,34 @@ All notable changes to **xfsr** / **xfsr-run** are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] — 2026-10-25
+
+### Added
+
+- In-game controls (default on): **F1** preset, **F2** RCAS, **F3** FSR,
+  **F4** offload, **F5** one-way, **F10** pin overlay; toast on change.
+  Disable with `XFSR_HUD=0` / `--no-controls`
+- Hotkeys via X11 and/or evdev (`/dev/input`); `XFSR_HUD_MOD=1` requires Shift
+- Control file `$XDG_RUNTIME_DIR/xfsr-control` (or `XFSR_CONTROL`): `preset`,
+  `rcas`, `fsr`, `offload`, `one-way`, `overlay`, `status`
+- **F4 live offload**: same-GPU ↔ round-trip without restart (keeps dGPU WSI)
+
+### Fixed
+
+- SIGSEGV on rapid swapchain recreate (glmark2 scenes / preset hotkey): drain present
+  fences before freeing proxy; keep status overlay on the device, not the swapchain
+- Clearer log when exclusive fullscreen locks size (`app == display`) so FSR cannot
+  shrink — use borderless windowed
+- Live F4 offload: always inject host/dma-buf device extensions on discrete CreateDevice
+  so mid-run transfer init does not call null ICD entry points
+- Identity-path F10 overlay + fence hang; bench recreates on `OUT_OF_DATE` (F1)
+- Ambient `XFSR_IGPU_PRESENT=force` no longer overrides `XFSR_OFFLOAD=0`
+- F3 FSR-on after blit / live F4 with FSR off: always allocate FSR outputs so
+  `fsr.record` does not SIGSEGV
+- Bench `--fullscreen` / `--windowed` for VK and GL loaders
+- `xfsr-run` / `xfsr-bench`: prefer X11 for native Vulkan FSR when `DISPLAY` is
+  set (Wayland `UINT_MAX` extent skipped shrink → flat FPS vs baseline)
+
 ## [0.3.1] — 2026-10-24
 
 ### Fixed

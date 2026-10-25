@@ -56,7 +56,9 @@ static void* resolve_next(const char* name, void* self);
 static int query_egl_drawable(int* out_w, int* out_h);
 
 static void load_extents(void) {
-    if (g_ready) return;
+    /* Re-read every time — F1 preset changes layer scale; env may be updated by
+     * a helper, and we must not latch launch ultra forever (postage-stamp after
+     * recreate to a different render size). */
     const char* dw = getenv("XFSR_DISPLAY_W");
     const char* dh = getenv("XFSR_DISPLAY_H");
     const char* rw = getenv("XFSR_RENDER_W");
@@ -68,11 +70,11 @@ static void load_extents(void) {
     g_rh = rh ? atoi(rh) : 0;
     g_scale = sc ? strtof(sc, NULL) : 0.f;
     if (g_scale < 1.01f) g_scale = 0.f;
-    g_ready = 1;
-    if (getenv("XFSR_VERBOSE")) {
+    if (!g_ready && getenv("XFSR_VERBOSE")) {
         fprintf(stderr, "[xfsr-gl] shim scale=%.2f render=%dx%d display_hint=%dx%d\n",
                 g_scale, g_rw, g_rh, g_dw, g_dh);
     }
+    g_ready = 1;
 }
 
 /* Map a window/fb size to the Zink color-image (render) size.
@@ -138,34 +140,72 @@ static void remap_rect(GLint* x, GLint* y, GLsizei* w, GLsizei* h) {
 
     if (ox != 0 || oy != 0 || *w <= 64 || *h <= 64) return;
 
+    /* Real window pixels — prefer last glfw fb before any lie. */
+    const int near = 2;
+    int win_w = (g_fb_w > 64) ? g_fb_w : 0;
+    int win_h = (g_fb_h > 64) ? g_fb_h : 0;
+
+    /* EGL drawable = Zink color image (tracks F1 recreate). Prefer it over
+     * latched XFSR_SCALE — stale scale remaps to the wrong size and leaves a
+     * postage-stamp in the corner of the new render image. */
+    int dw = 0, dh = 0;
+    const int have_egl = query_egl_drawable(&dw, &dh);
+
+    if (have_egl && win_w < 64) {
+        /* No glfw yet — if viewport looks like a window, use it as win. */
+        if ((int)*w >= 200 && (int)*h >= 200) {
+            win_w = (int)*w;
+            win_h = (int)*h;
+        }
+    }
+
+    if (have_egl && win_w >= 64 && win_h >= 64) {
+        /* Identity: drawable still window-sized → do not shrink. */
+        if (abs(dw - win_w) <= near && abs(dh - win_h) <= near) return;
+
+        /* Caps-shrunk drawable: any viewport that covers the drawable or the
+         * window (or is a stale smaller render size) → fill the drawable. */
+        if (dw + near < win_w || dh + near < win_h) {
+            const int covers_win =
+                (abs((int)*w - win_w) <= near && abs((int)*h - win_h) <= near);
+            const int covers_display =
+                (g_dw > 0 && g_dh > 0 && abs((int)*w - g_dw) <= near &&
+                 abs((int)*h - g_dh) <= near);
+            const int covers_drawable =
+                ((int)*w + near >= dw && (int)*h + near >= dh);
+            const int stale_smaller =
+                ((int)*w + 16 < dw && (int)*h + 16 < dh && (int)*w >= 64 && (int)*h >= 64);
+            if (covers_win || covers_display || covers_drawable || stale_smaller) {
+                if (x) *x = 0;
+                if (y) *y = 0;
+                *w = dw;
+                *h = dh;
+                if (!g_logged && (*w != ow || *h != oh) && getenv("XFSR_VERBOSE")) {
+                    g_logged = 1;
+                    fprintf(stderr,
+                            "[xfsr-gl] remap %dx%d → egl %dx%d (glfw_fb=%dx%d win=%dx%d)\n",
+                            (int)ow, (int)oh, dw, dh, g_fb_w, g_fb_h, win_w, win_h);
+                }
+                return;
+            }
+        }
+    }
+
+    /* Fallback without a reliable drawable: env scale / absolute render. */
+    if (win_w < 64) {
+        win_w = (int)*w;
+        win_h = (int)*h;
+    }
     int tw = 0, th = 0;
-    /* Prefer real window pixels as the source size for scaling. */
-    const int win_w = (g_fb_w > 64) ? g_fb_w : (int)*w;
-    const int win_h = (g_fb_h > 64) ? g_fb_h : (int)*h;
     target_render_size(win_w, win_h, &tw, &th);
     if (tw <= 0 || th <= 0) return;
-
-    /* Already at target render size — never shrink twice. */
     if (abs((int)*w - tw) <= 1 && abs((int)*h - th) <= 1) return;
 
-    /* Only remap full-window viewports (matches window or display hint). */
-    const int near = 2;
     const int is_window =
         (abs((int)*w - win_w) <= near && abs((int)*h - win_h) <= near);
     const int is_display =
         (g_dw > 0 && g_dh > 0 && abs((int)*w - g_dw) <= near && abs((int)*h - g_dh) <= near);
     if (!is_window && !is_display) return;
-
-    /* Wayland identity path: drawable still window-sized → do not shrink viewport. */
-    int dw = 0, dh = 0;
-    if (query_egl_drawable(&dw, &dh)) {
-        if (abs(dw - win_w) <= near && abs(dh - win_h) <= near) return; /* identity */
-        /* Caps-honored: drawable ≈ render size — remap window viewport into it. */
-        if (abs(dw - tw) > 16 || abs(dh - th) > 16) {
-            tw = dw;
-            th = dh;
-        }
-    }
 
     if (x) *x = 0;
     if (y) *y = 0;
@@ -174,8 +214,8 @@ static void remap_rect(GLint* x, GLint* y, GLsizei* w, GLsizei* h) {
 
     if (!g_logged && (*w != ow || *h != oh) && getenv("XFSR_VERBOSE")) {
         g_logged = 1;
-        fprintf(stderr, "[xfsr-gl] remap %dx%d → %dx%d (glfw_fb=%dx%d win=%dx%d egl=%dx%d)\n",
-                (int)ow, (int)oh, (int)*w, (int)*h, g_fb_w, g_fb_h, win_w, win_h, dw, dh);
+        fprintf(stderr, "[xfsr-gl] remap %dx%d → %dx%d (scale fallback win=%dx%d)\n", (int)ow,
+                (int)oh, (int)*w, (int)*h, win_w, win_h);
     }
 }
 
@@ -334,19 +374,18 @@ XFSR_EXPORT void glfwGetFramebufferSize(void* window, int* width, int* height) {
     if (!real) return;
     real(window, width, height);
     if (!width || !height) return;
+    /* Always stash the real window fb size before lying. */
     g_fb_w = *width;
     g_fb_h = *height;
     load_extents();
-    /* Lie render size only when Zink's drawable is already caps-shrunk. On
-     * Wayland identity (drawable == window) lying would desync projection. */
+    /* Lie the current Zink drawable size (follows F1 recreate). Do not use
+     * latched XFSR_SCALE — that desyncs after preset changes. */
     int dw = 0, dh = 0;
     if (!query_egl_drawable(&dw, &dh)) return;
-    int tw = 0, th = 0;
-    target_render_size(g_fb_w, g_fb_h, &tw, &th);
-    if (tw <= 0 || th <= 0) return;
-    if (abs(dw - tw) <= 2 && abs(dh - th) <= 2 && (tw != *width || th != *height)) {
-        *width = tw;
-        *height = th;
+    if (abs(dw - g_fb_w) <= 2 && abs(dh - g_fb_h) <= 2) return; /* identity */
+    if (dw + 2 < g_fb_w && dh + 2 < g_fb_h) {
+        *width = dw;
+        *height = dh;
     }
 }
 

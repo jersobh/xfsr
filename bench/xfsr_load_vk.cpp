@@ -4,6 +4,7 @@
 //
 // Usage:
 //   ./build/xfsr_load_vk [--seconds N] [--complexity N] [--width W] [--height H]
+//                        [--fullscreen|--windowed]
 //   xfsr-run --no-zink --preset performance ./build/xfsr_load_vk --seconds 8
 
 #ifndef VK_NO_PROTOTYPES
@@ -176,14 +177,18 @@ int main(int argc, char** argv) {
     int seconds = 8;
     int complexity = 64;
     int winW = 1920, winH = 1080;
+    bool fullscreen = false;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--seconds" && i + 1 < argc) seconds = std::atoi(argv[++i]);
         else if (a == "--complexity" && i + 1 < argc) complexity = std::atoi(argv[++i]);
         else if (a == "--width" && i + 1 < argc) winW = std::atoi(argv[++i]);
         else if (a == "--height" && i + 1 < argc) winH = std::atoi(argv[++i]);
+        else if (a == "--fullscreen" || a == "-f") fullscreen = true;
+        else if (a == "--windowed") fullscreen = false;
         else if (a == "-h" || a == "--help") {
-            std::printf("Usage: xfsr_load_vk [--seconds N] [--complexity N] [--width W] [--height H]\n");
+            std::printf("Usage: xfsr_load_vk [--seconds N] [--complexity N] [--width W] [--height H]\n"
+                        "                    [--fullscreen|--windowed]\n");
             return 0;
         }
     }
@@ -192,8 +197,19 @@ int main(int argc, char** argv) {
     if (!glfwInit()) die("glfwInit");
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+    GLFWmonitor* monitor = nullptr;
+    if (fullscreen) {
+        monitor = glfwGetPrimaryMonitor();
+        if (monitor) {
+            const GLFWvidmode* mode = glfwGetVideoMode(monitor);
+            if (mode) {
+                winW = mode->width;
+                winH = mode->height;
+            }
+        }
+    }
     GLFWwindow* window =
-        glfwCreateWindow(winW, winH, "xfsr_load_vk (uncapped)", nullptr, nullptr);
+        glfwCreateWindow(winW, winH, "xfsr_load_vk (uncapped)", monitor, nullptr);
     if (!window) die("glfwCreateWindow");
 
     check(volkInitialize(), "volkInitialize");
@@ -293,51 +309,63 @@ int main(int argc, char** argv) {
             if (pm == VK_PRESENT_MODE_MAILBOX_KHR) presentMode = pm;
     }
 
-    VkExtent2D extent = caps.currentExtent;
-    if (extent.width == 0xFFFFFFFFu) {
-        extent.width = std::clamp(static_cast<uint32_t>(winW), caps.minImageExtent.width,
-                                  caps.maxImageExtent.width);
-        extent.height = std::clamp(static_cast<uint32_t>(winH), caps.minImageExtent.height,
-                                   caps.maxImageExtent.height);
-    }
+    auto pickExtent = [&](const VkSurfaceCapabilitiesKHR& c) {
+        VkExtent2D e = c.currentExtent;
+        if (e.width == 0xFFFFFFFFu) {
+            e.width = std::clamp(static_cast<uint32_t>(winW), c.minImageExtent.width,
+                                 c.maxImageExtent.width);
+            e.height = std::clamp(static_cast<uint32_t>(winH), c.minImageExtent.height,
+                                  c.maxImageExtent.height);
+        }
+        return e;
+    };
+    VkExtent2D extent = pickExtent(caps);
     std::printf("swapchain %ux%u present=%s complexity=%d\n", extent.width, extent.height,
                 presentMode == VK_PRESENT_MODE_IMMEDIATE_KHR
                     ? "IMMEDIATE"
                     : (presentMode == VK_PRESENT_MODE_MAILBOX_KHR ? "MAILBOX" : "FIFO"),
                 complexity);
 
-    uint32_t imageCount = std::max(2u, caps.minImageCount);
-    if (caps.maxImageCount > 0) imageCount = std::min(imageCount + 1, caps.maxImageCount);
-
-    VkSwapchainCreateInfoKHR sci{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
-    sci.surface = surface;
-    sci.minImageCount = imageCount;
-    sci.imageFormat = surfFmt.format;
-    sci.imageColorSpace = surfFmt.colorSpace;
-    sci.imageExtent = extent;
-    sci.imageArrayLayers = 1;
-    sci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-    sci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    sci.preTransform = caps.currentTransform;
-    sci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-    sci.presentMode = presentMode;
-    sci.clipped = VK_TRUE;
     VkSwapchainKHR swapchain = VK_NULL_HANDLE;
-    check(vkCreateSwapchainKHR(device, &sci, nullptr, &swapchain), "vkCreateSwapchainKHR");
+    std::vector<VkImage> images;
+    std::vector<VkImageView> views;
+    std::vector<VkFramebuffer> fbs;
 
-    uint32_t nImg = 0;
-    vkGetSwapchainImagesKHR(device, swapchain, &nImg, nullptr);
-    std::vector<VkImage> images(nImg);
-    vkGetSwapchainImagesKHR(device, swapchain, &nImg, images.data());
-    std::vector<VkImageView> views(nImg);
-    for (uint32_t i = 0; i < nImg; ++i) {
-        VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-        vci.image = images[i];
-        vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        vci.format = surfFmt.format;
-        vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        check(vkCreateImageView(device, &vci, nullptr, &views[i]), "vkCreateImageView");
-    }
+    auto createSwapchainLocals = [&](VkSwapchainKHR oldSc) {
+        vkGetPhysicalDeviceSurfaceCapabilitiesKHR(phys, surface, &caps);
+        extent = pickExtent(caps);
+        uint32_t imageCount = std::max(2u, caps.minImageCount);
+        if (caps.maxImageCount > 0) imageCount = std::min(imageCount + 1, caps.maxImageCount);
+        VkSwapchainCreateInfoKHR sci{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
+        sci.surface = surface;
+        sci.minImageCount = imageCount;
+        sci.imageFormat = surfFmt.format;
+        sci.imageColorSpace = surfFmt.colorSpace;
+        sci.imageExtent = extent;
+        sci.imageArrayLayers = 1;
+        sci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        sci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        sci.preTransform = caps.currentTransform;
+        sci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+        sci.presentMode = presentMode;
+        sci.clipped = VK_TRUE;
+        sci.oldSwapchain = oldSc;
+        check(vkCreateSwapchainKHR(device, &sci, nullptr, &swapchain), "vkCreateSwapchainKHR");
+        if (oldSc) vkDestroySwapchainKHR(device, oldSc, nullptr);
+        uint32_t nImg = 0;
+        vkGetSwapchainImagesKHR(device, swapchain, &nImg, nullptr);
+        images.resize(nImg);
+        vkGetSwapchainImagesKHR(device, swapchain, &nImg, images.data());
+        views.resize(nImg);
+        for (uint32_t i = 0; i < nImg; ++i) {
+            VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+            vci.image = images[i];
+            vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            vci.format = surfFmt.format;
+            vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            check(vkCreateImageView(device, &vci, nullptr, &views[i]), "vkCreateImageView");
+        }
+    };
 
     VkAttachmentDescription att{};
     att.format = surfFmt.format;
@@ -361,17 +389,19 @@ int main(int argc, char** argv) {
     VkRenderPass renderPass = VK_NULL_HANDLE;
     check(vkCreateRenderPass(device, &rpci, nullptr, &renderPass), "vkCreateRenderPass");
 
-    std::vector<VkFramebuffer> fbs(nImg);
-    for (uint32_t i = 0; i < nImg; ++i) {
-        VkFramebufferCreateInfo fbci{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
-        fbci.renderPass = renderPass;
-        fbci.attachmentCount = 1;
-        fbci.pAttachments = &views[i];
-        fbci.width = extent.width;
-        fbci.height = extent.height;
-        fbci.layers = 1;
-        check(vkCreateFramebuffer(device, &fbci, nullptr, &fbs[i]), "vkCreateFramebuffer");
-    }
+    auto buildFramebuffers = [&]() {
+        fbs.resize(views.size());
+        for (size_t i = 0; i < views.size(); ++i) {
+            VkFramebufferCreateInfo fbci{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+            fbci.renderPass = renderPass;
+            fbci.attachmentCount = 1;
+            fbci.pAttachments = &views[i];
+            fbci.width = extent.width;
+            fbci.height = extent.height;
+            fbci.layers = 1;
+            check(vkCreateFramebuffer(device, &fbci, nullptr, &fbs[i]), "vkCreateFramebuffer");
+        }
+    };
 
     auto vertSpv = compileGlsl("vertex", kVert);
     auto fragSpv = compileGlsl("fragment", kFrag);
@@ -401,13 +431,14 @@ int main(int argc, char** argv) {
     VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
     VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
     ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-    VkViewport vp{0, 0, static_cast<float>(extent.width), static_cast<float>(extent.height), 0, 1};
-    VkRect2D sc{{0, 0}, extent};
+    // Dynamic viewport — F1 preset / OUT_OF_DATE recreate changes extent mid-run.
     VkPipelineViewportStateCreateInfo vps{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
     vps.viewportCount = 1;
-    vps.pViewports = &vp;
     vps.scissorCount = 1;
-    vps.pScissors = &sc;
+    VkDynamicState dynStates[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dyn{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+    dyn.dynamicStateCount = 2;
+    dyn.pDynamicStates = dynStates;
     VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
     rs.polygonMode = VK_POLYGON_MODE_FILL;
     rs.cullMode = VK_CULL_MODE_NONE;
@@ -430,6 +461,7 @@ int main(int argc, char** argv) {
     gpci.pRasterizationState = &rs;
     gpci.pMultisampleState = &ms;
     gpci.pColorBlendState = &cb;
+    gpci.pDynamicState = &dyn;
     gpci.layout = pipelineLayout;
     gpci.renderPass = renderPass;
     VkPipeline pipeline = VK_NULL_HANDLE;
@@ -437,6 +469,9 @@ int main(int argc, char** argv) {
           "vkCreateGraphicsPipelines");
     vkDestroyShaderModule(device, vertMod, nullptr);
     vkDestroyShaderModule(device, fragMod, nullptr);
+
+    createSwapchainLocals(VK_NULL_HANDLE);
+    buildFramebuffers();
 
     VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
     pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
@@ -448,6 +483,7 @@ int main(int argc, char** argv) {
     VkCommandBuffer cmds[kFrames]{};
     VkSemaphore imageAvail[kFrames]{}, renderDone[kFrames]{};
     VkFence fences[kFrames]{};
+    uint32_t frameSlot = 0;
     VkCommandBufferAllocateInfo cai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
     cai.commandPool = pool;
     cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
@@ -462,12 +498,37 @@ int main(int argc, char** argv) {
         check(vkCreateFence(device, &fci, nullptr, &fences[i]), "fence");
     }
 
+    // OUT_OF_DATE after a submit that signaled renderDone leaves that binary
+    // semaphore signaled forever (present never waited) → next submit hangs.
+    auto recreateSwapchain = [&]() {
+        vkDeviceWaitIdle(device);
+        VkSwapchainKHR old = swapchain;
+        swapchain = VK_NULL_HANDLE;
+        for (auto fb : fbs) vkDestroyFramebuffer(device, fb, nullptr);
+        for (auto v : views) vkDestroyImageView(device, v, nullptr);
+        fbs.clear();
+        views.clear();
+        images.clear();
+        createSwapchainLocals(old);
+        buildFramebuffers();
+        for (uint32_t i = 0; i < kFrames; ++i) {
+            vkDestroySemaphore(device, imageAvail[i], nullptr);
+            vkDestroySemaphore(device, renderDone[i], nullptr);
+            vkDestroyFence(device, fences[i], nullptr);
+            check(vkCreateSemaphore(device, &semci, nullptr, &imageAvail[i]), "sem");
+            check(vkCreateSemaphore(device, &semci, nullptr, &renderDone[i]), "sem2");
+            check(vkCreateFence(device, &fci, nullptr, &fences[i]), "fence");
+        }
+        frameSlot = 0;
+        std::fprintf(stderr, "xfsr_load_vk: swapchain recreated %ux%u\n", extent.width,
+                     extent.height);
+    };
+
     auto t0 = std::chrono::steady_clock::now();
     auto tReport = t0;
     uint64_t frames = 0;
     uint64_t framesWindow = 0;
     double bestFps = 0, lastFps = 0;
-    uint32_t frameSlot = 0;
     float time = 0.0f;
 
     std::printf("XFSR_BENCH_BEGIN api=vulkan seconds=%d complexity=%d extent=%ux%u\n", seconds,
@@ -486,7 +547,10 @@ int main(int argc, char** argv) {
         uint32_t imageIndex = 0;
         VkResult acq = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, imageAvail[slot],
                                              VK_NULL_HANDLE, &imageIndex);
-        if (acq == VK_ERROR_OUT_OF_DATE_KHR) break;
+        if (acq == VK_ERROR_OUT_OF_DATE_KHR) {
+            recreateSwapchain();
+            continue;
+        }
         if (acq != VK_SUCCESS && acq != VK_SUBOPTIMAL_KHR) check(acq, "acquire");
 
         check(vkResetCommandBuffer(cmds[slot], 0), "reset cmd");
@@ -504,6 +568,11 @@ int main(int argc, char** argv) {
         rpbi.pClearValues = &clear;
         vkCmdBeginRenderPass(cmds[slot], &rpbi, VK_SUBPASS_CONTENTS_INLINE);
         vkCmdBindPipeline(cmds[slot], VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+        VkViewport vp{0, 0, static_cast<float>(extent.width), static_cast<float>(extent.height), 0,
+                      1};
+        VkRect2D sc{{0, 0}, extent};
+        vkCmdSetViewport(cmds[slot], 0, 1, &vp);
+        vkCmdSetScissor(cmds[slot], 0, 1, &sc);
         struct {
             float time;
             int complexity;
@@ -537,7 +606,10 @@ int main(int argc, char** argv) {
         pi.pSwapchains = &swapchain;
         pi.pImageIndices = &imageIndex;
         VkResult pr = vkQueuePresentKHR(queue, &pi);
-        if (pr == VK_ERROR_OUT_OF_DATE_KHR) break;
+        if (pr == VK_ERROR_OUT_OF_DATE_KHR) {
+            recreateSwapchain();
+            continue;
+        }
 
         frameSlot = (slot + 1) % kFrames;
         ++frames;

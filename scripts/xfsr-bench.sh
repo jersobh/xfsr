@@ -41,6 +41,14 @@ fi
 
 ARGS=(--seconds "$SECONDS_N" --complexity "$COMPLEXITY" --width "$WIN_W" --height "$WIN_H")
 
+# Force X11 for the whole suite. Wayland currentExtent is often UINT_MAX → no
+# caps-shrink → VK rows look identical to baseline while GL/Zink (which already
+# cleared Wayland) looks "magically" faster.
+if [[ -n "${WAYLAND_DISPLAY:-}" && -n "${DISPLAY:-}" && "${XFSR_BENCH_WAYLAND:-0}" != "1" ]]; then
+  echo "xfsr-bench: clearing WAYLAND_DISPLAY for fair X11 FSR (XFSR_BENCH_WAYLAND=1 to keep)"
+  unset WAYLAND_DISPLAY WAYLAND_SOCKET
+fi
+
 # Prefix for baseline apps (no xfsr-run). Empty when HUD disabled.
 MH_BASE=()
 if [[ $USE_MANGOHUD -eq 1 ]]; then
@@ -114,6 +122,23 @@ for row in "${RESULTS[@]}"; do
 done
 echo "╚════════════════════════════════════════╩═════════╩═════════╩════════════════╝"
 echo
-echo "Tip: xfsr rows should show a *lower* extent than baseline (e.g. 960x540 vs 1920x1080)."
-echo "     If extent stays full-window, FSR never engaged (Wayland needs --output / DISPLAY_EXTENT)."
-echo "     --offload only wins if the log shows dual-GPU (else same-GPU fallback)."
+# Flag misleading runs: GL always reports window framebuffer size; VK reports
+# swapchain/render extent — so VK xfsr must shrink vs baseline.
+_base_ext=""
+_warn=0
+for row in "${RESULTS[@]}"; do
+  IFS='|' read -r name avg best extent <<<"$row"
+  if [[ "$name" == "vk baseline (no layer)" ]]; then
+    _base_ext="$extent"
+  elif [[ "$name" == vk\ xfsr* && -n "$_base_ext" && "$extent" == "$_base_ext" ]]; then
+    echo "WARN: '$name' extent=$extent same as baseline — FSR did not engage (Wayland?)."
+    _warn=1
+  fi
+done
+if [[ $_warn -eq 1 ]]; then
+  echo "     Re-run on X11 (unset WAYLAND_DISPLAY) or upgrade xfsr-run (clears Wayland for VK)."
+fi
+unset _base_ext _warn
+echo "Tip: VK xfsr rows should show a *lower* extent than baseline (e.g. 960x540 vs 1920x1080)."
+echo "     GL rows keep window extent in the table — look for ~2× FPS vs native GL instead."
+echo "     --offload is usually *slower* (PCIe round-trip); check log for dual-GPU."

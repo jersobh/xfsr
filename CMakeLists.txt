@@ -201,11 +201,13 @@ add_library(xfsr_core_layer OBJECT
   ${XFSR_CORE_SOURCES}
   ${volk_SOURCE_DIR}/volk.c
   layer/xfsr_layer.cpp
+  layer/xfsr_controls.cpp
 )
 add_dependencies(xfsr_core_layer shaders)
 target_include_directories(xfsr_core_layer PRIVATE
   ${vulkan_headers_SOURCE_DIR}/include
   ${CMAKE_CURRENT_SOURCE_DIR}/src
+  ${CMAKE_CURRENT_SOURCE_DIR}/layer
   ${volk_SOURCE_DIR}
   ${FFX_FSR_DIR}
 )

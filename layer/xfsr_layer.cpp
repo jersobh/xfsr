@@ -18,6 +18,7 @@
 #include "frame_transfer.hpp"
 #include "fsr_pass.hpp"
 #include "gpu_image.hpp"
+#include "xfsr_controls.hpp"
 
 #ifndef VK_LAYER_EXPORT
 #if defined(__GNUC__) && __GNUC__ >= 4
@@ -182,11 +183,12 @@ bool layerFsrPassEnabled() {
 }
 
 bool offloadEnabled() {
-    // Default OFF: dual-GPU DMA crashes/slows many titles (CS2). Opt in with
-    // XFSR_OFFLOAD=1 or xfsr-run --offload.
+    // Prefer explicit env — HUD peek can lag or be tainted by ambient IGPU_PRESENT.
     const char* o = xfsrEnv("XFSR_OFFLOAD", "CROSSVULKAN_OFFLOAD");
-    if (!o || !o[0]) return false;
-    return o[0] != '0';
+    if (o && o[0] == '0') return false;
+    if (o && o[0] && o[0] != '0') return true;
+    if (xfsr_ctrl::enabled()) return xfsr_ctrl::peek().offload;
+    return false;
 }
 
 struct DeviceData; // forward — igpuPresentWanted reads dGPU vendor
@@ -327,6 +329,11 @@ struct DeviceData {
     // Dedupe "ready" / first-present logs across swapchain recreates.
     uint32_t loggedRw = 0, loggedRh = 0, loggedDw = 0, loggedDh = 0;
     bool loggedFirstPresent = false;
+    bool loggedFixedCaps = false;
+
+    // Status overlay lives on the device so swapchain recreate (glmark2 scenes,
+    // preset hotkey) cannot free GPU memory still referenced by in-flight presents.
+    xfsr_ctrl::OverlayGpu overlay{};
 };
 
 struct ProxySwapchain {
@@ -397,6 +404,18 @@ std::unordered_map<void*, DeviceData*> g_devices;
 std::unordered_map<void*, ProxySwapchain*> g_proxies;
 // Passthrough swapchains that should return OUT_OF_DATE once (zink Wayland kick).
 std::unordered_set<void*> g_forceOutOfDateOnce;
+// Identity present (no FSR proxy): cache WSI images so F10 overlay can blit.
+struct PassthroughSc {
+    std::vector<VkImage> images;
+    uint32_t w = 0, h = 0;
+    bool transferDst = false;
+};
+std::unordered_map<void*, PassthroughSc> g_passthrough;
+VkSemaphore g_overlayDoneSem = VK_NULL_HANDLE;
+VkFence g_overlayFence = VK_NULL_HANDLE;
+VkCommandBuffer g_overlayCmd = VK_NULL_HANDLE;
+bool g_overlaySyncReady = false;
+bool g_loggedOverlaySkip = false;
 // Companion VkDevices are created via loader callback (not in g_devices). volkLoadDevice
 // still goes through our GDPA — forward to the ICD/loader GDPA saved at create time.
 std::unordered_map<void*, PFN_vkGetDeviceProcAddr> g_companionGdpa;
@@ -415,31 +434,51 @@ bool presentsOnIgpu(const ProxySwapchain* ps) {
     return ps && ps->offloadIgpu && !ps->zinkOffloadRoundtrip;
 }
 
+// Same-GPU (and round-trip): app's swapchain handle IS the real WSI. Swallowing
+// OUT_OF_DATE there exhausts images / leaves fences unsignaled → freeze.
+// Opaque one-way: we own real WSI under a different handle; safe to swallow.
+bool appOwnsRealWsi(const ProxySwapchain* ps) {
+    return ps && !ps->opaqueAppHandle && ps->realSwapchain != VK_NULL_HANDLE &&
+           ps->appSwapchain == ps->realSwapchain;
+}
+
 bool igpuPresentWanted(const DeviceData* dd) {
-    const char* o = xfsrEnv("XFSR_IGPU_PRESENT", "CROSSVULKAN_IGPU_PRESENT");
-    if (o && o[0] == '0') return false;
+    bool want = true;
+    bool force = false;
+    if (xfsr_ctrl::enabled()) {
+        const xfsr_ctrl::Snapshot s = xfsr_ctrl::peek();
+        if (!s.offload) return false;
+        want = s.oneWay;
+        force = s.oneWayForce;
+    } else {
+        const char* o = xfsrEnv("XFSR_IGPU_PRESENT", "CROSSVULKAN_IGPU_PRESENT");
+        if (o && o[0] == '0') return false;
+        if (o && (std::strcmp(o, "force") == 0 || o[0] == '2')) force = true;
+        else if (o && o[0] == '1')
+            want = true;
+        // unset → Mesa prefers one-way (want stays true)
+    }
+    if (!want) return false;
+
     const bool nvidia = dd && dd->dgpuReady && dd->dgpu.props.vendorID == 0x10deu;
     // NVIDIA + opaque app swapchain: first present can work, then recreate/MangoHud
     // leaks WSI into the NVIDIA ICD → SIGSEGV (vkcube --one-way). Refuse unless forced.
     if (nvidia) {
-        if (o && (std::strcmp(o, "force") == 0 || o[0] == '2')) {
+        if (force) {
             std::fprintf(stderr,
                          "[xfsr] WARNING: forcing one-way on NVIDIA — likely SIGSEGV with "
                          "MangoHud/recreate\n");
             return true;
         }
-        if (o && o[0] == '1') {
-            static bool loggedIgnore = false;
-            if (!loggedIgnore) {
-                loggedIgnore = true;
-                std::fprintf(stderr,
-                             "[xfsr] --one-way ignored on NVIDIA (opaque WSI SIGSEGV on recreate); "
-                             "using round-trip. XFSR_IGPU_PRESENT=force to override.\n");
-            }
+        static bool loggedIgnore = false;
+        if (!loggedIgnore) {
+            loggedIgnore = true;
+            std::fprintf(stderr,
+                         "[xfsr] --one-way ignored on NVIDIA (opaque WSI SIGSEGV on recreate); "
+                         "using round-trip. XFSR_IGPU_PRESENT=force to override.\n");
         }
         return false;
     }
-    if (o && o[0] == '1') return true;
     return true; // Mesa dGPU: try one-way
 }
 
@@ -541,13 +580,36 @@ void destroyPresentRing(ProxySwapchain* ps, DeviceContext& ctx) {
     ps->fsrDirectToSwapchain = false;
 }
 
+void waitPresentRing(ProxySwapchain* ps, DeviceContext& presentCtx) {
+    if (!ps || !presentCtx.device) return;
+    presentCtx.loadDispatch();
+    auto& d = presentCtx.vk;
+    if (!d.WaitForFences) return;
+    for (uint32_t i = 0; i < ProxySwapchain::kFrames; ++i) {
+        if (ps->inFlight[i])
+            d.WaitForFences(presentCtx.device, 1, &ps->inFlight[i], VK_TRUE, UINT64_MAX);
+    }
+}
+
 void destroyProxy(ProxySwapchain* ps) {
     if (!ps) return;
     DeviceData* dd = ps->dev;
+    if (dd) {
+        DeviceContext& presentCtx = presentsOnIgpu(ps) ? dd->igpu : dd->dgpu;
+        // Drain the present ring before freeing FSR/app images — overlay is on
+        // DeviceData and must not be destroyed here (recreate races → SIGSEGV).
+        waitPresentRing(ps, presentCtx);
+        if (dd->dgpuReady) {
+            dd->dgpu.loadDispatch();
+            auto& dvk = dd->dgpu.vk;
+            if (dvk.WaitForFences) {
+                for (VkFence f : ps->appImgFence) {
+                    if (f) dvk.WaitForFences(dd->dgpu.device, 1, &f, VK_TRUE, UINT64_MAX);
+                }
+            }
+        }
+    }
     if (ps->pipelineReady) {
-        // Do NOT QueueWaitIdle here — CS2 recreates the swapchain often; a full idle
-        // per destroy pinned the logo screen at single-digit FPS. Fences in the present
-        // ring + ICD oldSwapchain retirement are enough for in-flight work.
         ps->fsr.destroy();
         ps->pipelineReady = false;
     }
@@ -688,7 +750,7 @@ bool createPresentRing(ProxySwapchain* ps, DeviceContext& ctx) {
 bool queryTrueSurfaceExtent(DeviceData* dd, VkSurfaceKHR surface, uint32_t* outW, uint32_t* outH);
 
 bool setupOffloadPipeline(ProxySwapchain* ps, VkSwapchainKHR oldPresentSwapchain,
-                          VkSwapchainKHR oldAppSwapchain) {
+                          VkSwapchainKHR oldAppSwapchain, bool preserveAppImages = false) {
     DeviceData* dd = ps->dev;
     if (!dd || !dd->dgpuReady || !dd->inst || !dd->inst->volkReady) return false;
     // Proxy + FSR path is driven by XFSR_FSR; OFFLOAD only selects dual-GPU.
@@ -846,6 +908,9 @@ bool setupOffloadPipeline(ProxySwapchain* ps, VkSwapchainKHR oldPresentSwapchain
                      FrameTransfer::backendName(dd->xferBack.backend));
             }
             presentCtx = &dd->dgpu;
+            // Round-trip / same-GPU: expose the real ICD swapchain. Opaque handles
+            // here SIGSEGV MangoHud (it caches by handle; 0x11/0x21 serials blow up).
+            // One-way iGPU present keeps opaqueAppHandle=true (set above).
             ps->opaqueAppHandle = false;
             cr = createPresentWsi(&dd->dgpu, false,
                                  oldPresentSwapchain ? oldPresentSwapchain : oldAppSwapchain,
@@ -863,41 +928,52 @@ bool setupOffloadPipeline(ProxySwapchain* ps, VkSwapchainKHR oldPresentSwapchain
 
         if (!createPresentRing(ps, *presentCtx)) return false;
 
-        dd->dgpu.loadDispatch();
-        const VkImageUsageFlags appUsage =
-            (ps->imageUsage | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-             VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
-        ps->appImages.resize(std::max(2u, n));
-        for (size_t i = 0; i < ps->appImages.size(); ++i) {
-            ps->appImages[i] =
-                createImage(&dd->dgpu, ps->renderW, ps->renderH, ps->format, appUsage,
-                            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, VK_IMAGE_TILING_OPTIMAL, true);
-        }
-        {
-            destroyAppImgFences(ps, dd);
-            VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-            fci.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-            ps->appImgFence.resize(ps->appImages.size());
-            for (size_t i = 0; i < ps->appImgFence.size(); ++i) {
-                vkCheck(dd->dgpu.vk.CreateFence(dd->dgpu.device, &fci, nullptr, &ps->appImgFence[i]),
-                        "appImgFence");
+        if (!preserveAppImages) {
+            dd->dgpu.loadDispatch();
+            const VkImageUsageFlags appUsage =
+                (ps->imageUsage | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                 VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+            ps->appImages.resize(std::max(2u, n));
+            for (size_t i = 0; i < ps->appImages.size(); ++i) {
+                ps->appImages[i] =
+                    createImage(&dd->dgpu, ps->renderW, ps->renderH, ps->format, appUsage,
+                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, VK_IMAGE_TILING_OPTIMAL, true);
             }
+            {
+                destroyAppImgFences(ps, dd);
+                VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+                fci.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+                ps->appImgFence.resize(ps->appImages.size());
+                for (size_t i = 0; i < ps->appImgFence.size(); ++i) {
+                    vkCheck(dd->dgpu.vk.CreateFence(dd->dgpu.device, &fci, nullptr,
+                                                    &ps->appImgFence[i]),
+                            "appImgFence");
+                }
+            }
+        } else if (ps->appImages.empty()) {
+            return false;
         }
 
-        ps->useFsr = scaling && layerFsrPassEnabled();
+        {
+            const bool wantFsr =
+                scaling && (xfsr_ctrl::enabled() ? xfsr_ctrl::peek().fsr : layerFsrPassEnabled());
+            ps->useFsr = wantFsr;
+        }
         ps->fsrDirectToSwapchain = false;
         ps->fsrDirectSwizzleBgra = false;
-        if (ps->useFsr) {
+        // Always init+resize when scaling so F3 can flip blit↔FSR without recreate.
+        if (scaling) {
             DeviceContext* fsrCtx = ps->offloadIgpu ? &dd->igpu : &dd->dgpu;
             fsrCtx->loadDispatch();
             ps->fsr.init(fsrCtx);
+            if (xfsr_ctrl::enabled()) ps->fsr.enableRcas = xfsr_ctrl::peek().rcas;
             ps->fsr.resize(ps->renderW, ps->renderH, ps->displayW, ps->displayH);
             // Round-trip FSR writes an iGPU image; cannot STORAGE into the dGPU swapchain.
             // Direct STORAGE→WSI DEVICE_LOSTs on NVIDIA GTX 1650 after the first present
             // even when STORAGE usage was granted (BGRA_UNORM). Prefer FSR→blit.
             (void)presentHasStorage;
             const bool fmtOkDirect = false && presentHasStorage && !ps->zinkOffloadRoundtrip &&
-                                     ps->fsr.canDirectToSwapchain(ps->format);
+                                     ps->useFsr && ps->fsr.canDirectToSwapchain(ps->format);
             if (fmtOkDirect) {
                 ps->realViews.resize(ps->realImages.size());
                 for (size_t i = 0; i < ps->realImages.size(); ++i) {
@@ -973,16 +1049,109 @@ bool setupOffloadPipeline(ProxySwapchain* ps, VkSwapchainKHR oldPresentSwapchain
                 wsi.DestroySwapchainKHR(presentCtx->device, ps->realSwapchain, nullptr);
             ps->realSwapchain = VK_NULL_HANDLE;
         }
-        if (ps->appSwapchain && ps->appSwapchain != ps->realSwapchain) {
-            WsiFns dwsi = wsiFnsFor(dd, false);
-            if (dwsi.DestroySwapchainKHR)
-                dwsi.DestroySwapchainKHR(dd->dgpu.device, ps->appSwapchain, nullptr);
+        if (!preserveAppImages) {
+            if (ps->appSwapchain && ps->appSwapchain != ps->realSwapchain && !ps->opaqueAppHandle) {
+                WsiFns dwsi = wsiFnsFor(dd, false);
+                if (dwsi.DestroySwapchainKHR)
+                    dwsi.DestroySwapchainKHR(dd->dgpu.device, ps->appSwapchain, nullptr);
+            }
+            if (!ps->opaqueAppHandle) ps->appSwapchain = VK_NULL_HANDLE;
+            for (auto& img : ps->appImages) img.destroy();
+            ps->appImages.clear();
         }
-        ps->appSwapchain = VK_NULL_HANDLE;
-        for (auto& img : ps->appImages) img.destroy();
-        ps->appImages.clear();
         ps->offloadIgpu = false;
         ps->zinkOffloadRoundtrip = false;
+        ps->pipelineReady = false;
+        return false;
+    }
+}
+
+// Hotkey F4: same-GPU FSR ↔ round-trip offload without touching the dGPU WSI
+// (destroying a shared app/real handle mid-run SIGSEGVs MangoHud/Zink).
+// One-way (iGPU WSI) is not switched live — restart with --one-way.
+bool reconfigureOffloadPresentPath(ProxySwapchain* ps) {
+    if (!ps || !ps->dev || !ps->pipelineReady) return false;
+    DeviceData* dd = ps->dev;
+    if (presentsOnIgpu(ps) || ps->opaqueAppHandle) {
+        std::fprintf(stderr,
+                     "[xfsr] live offload switch skipped (one-way WSI) — restart to change mode\n");
+        return false;
+    }
+    if (ps->renderW == ps->displayW && ps->renderH == ps->displayH) {
+        std::fprintf(stderr, "[xfsr] live offload skipped (no scale — nothing to transfer)\n");
+        return false;
+    }
+
+    DeviceContext& presentCtx = dd->dgpu;
+    waitPresentRing(ps, presentCtx);
+    waitOffloadIdle(dd);
+
+    const bool wantOffload = xfsr_ctrl::enabled() ? xfsr_ctrl::peek().offload : offloadEnabled();
+    const bool wantFsr = xfsr_ctrl::enabled() ? xfsr_ctrl::peek().fsr : layerFsrPassEnabled();
+    const bool wantRcas = xfsr_ctrl::enabled() ? xfsr_ctrl::peek().rcas : true;
+
+    ps->fsr.destroy();
+    if (dd->xferReady) {
+        dd->xfer.destroy();
+        dd->xferReady = false;
+    }
+    if (dd->xferBackReady) {
+        dd->xferBack.destroy();
+        dd->xferBackReady = false;
+    }
+
+    try {
+        if (wantOffload) {
+            if (!tryInitCompanionIgpu(dd, ps->surface)) {
+                std::fprintf(stderr, "[xfsr] live offload: iGPU unavailable — staying same-GPU\n");
+                ps->offloadIgpu = false;
+                ps->zinkOffloadRoundtrip = false;
+                ps->fsr.init(&dd->dgpu);
+            } else {
+                // Always round-trip for live toggle (dGPU keeps window WSI).
+                ps->offloadIgpu = true;
+                ps->zinkOffloadRoundtrip = true;
+                dd->forceRoundTripOffload = true;
+                dd->dgpu.loadDispatch();
+                dd->igpu.loadDispatch();
+                dd->xfer.init(&dd->dgpu, &dd->igpu);
+                dd->xferReady = true;
+                dd->xfer.resize(ps->renderW, ps->renderH, ps->format, 4);
+                dd->xferBack.init(&dd->igpu, &dd->dgpu);
+                dd->xferBackReady = true;
+                dd->xferBack.resize(ps->displayW, ps->displayH, VK_FORMAT_R8G8B8A8_UNORM, 4);
+                ps->fsr.init(&dd->igpu);
+            }
+        } else {
+            ps->offloadIgpu = false;
+            ps->zinkOffloadRoundtrip = false;
+            dd->dgpu.loadDispatch();
+            ps->fsr.init(&dd->dgpu);
+        }
+        ps->useFsr = wantFsr;
+        ps->fsr.enableRcas = wantRcas;
+        // Always allocate FSR outputs — F3 can flip blit↔FSR without another reconfigure.
+        ps->fsr.resize(ps->renderW, ps->renderH, ps->displayW, ps->displayH);
+        // Companion create can clobber global volk — refresh present-device dispatch.
+        dd->dgpu.loadDispatch();
+        if (ps->offloadIgpu) dd->igpu.loadDispatch();
+        // Present ring + real WSI stay on dGPU for both modes.
+        std::fprintf(stderr, "[xfsr] reconfigured live: offload=%s (round-trip) FSR=%s xfer=%s\n",
+                     ps->offloadIgpu ? "on" : "off", ps->useFsr ? "on" : "off",
+                     ps->offloadIgpu ? FrameTransfer::backendName(dd->xfer.backend) : "n/a");
+        return true;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "[xfsr] live offload reconfigure failed: %s\n", e.what());
+        // Best-effort same-GPU recovery.
+        ps->offloadIgpu = false;
+        ps->zinkOffloadRoundtrip = false;
+        try {
+            ps->fsr.init(&dd->dgpu);
+            ps->useFsr = wantFsr;
+            ps->fsr.enableRcas = wantRcas;
+            ps->fsr.resize(ps->renderW, ps->renderH, ps->displayW, ps->displayH);
+        } catch (...) {
+        }
         return false;
     }
 }
@@ -1022,7 +1191,8 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateInstance(const VkInstanceCreateInfo* p
     id->gipa = gipa;
     id->layerCreateDevice = layerCreateDevice;
     id->layerDestroyDevice = layerDestroyDevice;
-    id->scale = presetScaleFromEnv();
+    xfsr_ctrl::initFromEnv();
+    id->scale = xfsr_ctrl::enabled() ? xfsr_ctrl::peek().scale : presetScaleFromEnv();
     applyDisplayExtentHint(&id->hintW, &id->hintH);
     // Keep hint in realW only for caps-shrink seeding; queryTrueSurfaceExtent ignores
     // it until a concrete compositor extent is seen (avoids 1080p WSI on tiny windows).
@@ -1205,9 +1375,10 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateDevice(VkPhysicalDevice physicalDevice
     VkPhysicalDeviceProperties propsEarly{};
     if (id && id->GetPhysicalDeviceProperties)
         id->GetPhysicalDeviceProperties(physicalDevice, &propsEarly);
+    // Always inject transfer exts on discrete when FSR is on — needed for live F4
+    // offload (CreateDevice already happened with offload=0 otherwise).
     const bool wantXferExts =
-        propsEarly.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU && fsrEnabled() &&
-        offloadEnabled(); // dual-GPU FrameTransfer (host / dma-buf)
+        propsEarly.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU && fsrEnabled();
 
     VkDeviceCreateInfo ci = *pCreateInfo;
     std::vector<const char*> extPtrs;
@@ -1352,6 +1523,8 @@ VKAPI_ATTR void VKAPI_CALL xfsr_DestroyDevice(VkDevice device,
             dd->xferBack.destroy();
             dd->xferBackReady = false;
         }
+        waitOffloadIdle(dd);
+        xfsr_ctrl::destroyOverlay(&dd->overlay);
         if (dd->igpuReady) {
             {
                 std::lock_guard<std::mutex> lock(g_mu);
@@ -1446,7 +1619,135 @@ VkResult createSwapchainPassthrough(DeviceData* dd, const VkSwapchainCreateInfoK
             ci.imageExtent.height = realH;
         }
     }
-    return dd->CreateSwapchainKHR(dd->device, &ci, pAllocator, pSwapchain);
+    // F10 overlay blits onto the WSI — needs TRANSFER_DST (bench only requests color).
+    const bool wantHud = xfsr_ctrl::enabled();
+    const VkImageUsageFlags usageWithDst = ci.imageUsage | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    bool gotDst = false;
+    VkResult r = VK_ERROR_INITIALIZATION_FAILED;
+    if (wantHud && usageWithDst != ci.imageUsage) {
+        VkSwapchainCreateInfoKHR ciDst = ci;
+        ciDst.imageUsage = usageWithDst;
+        r = dd->CreateSwapchainKHR(dd->device, &ciDst, pAllocator, pSwapchain);
+        gotDst = (r == VK_SUCCESS);
+    }
+    if (!gotDst) r = dd->CreateSwapchainKHR(dd->device, &ci, pAllocator, pSwapchain);
+    if (r == VK_SUCCESS && pSwapchain && *pSwapchain && dd->GetSwapchainImagesKHR) {
+        PassthroughSc pt{};
+        pt.w = ci.imageExtent.width;
+        pt.h = ci.imageExtent.height;
+        pt.transferDst = gotDst || ((ci.imageUsage & VK_IMAGE_USAGE_TRANSFER_DST_BIT) != 0);
+        uint32_t n = 0;
+        dd->GetSwapchainImagesKHR(dd->device, *pSwapchain, &n, nullptr);
+        pt.images.resize(n);
+        if (n) dd->GetSwapchainImagesKHR(dd->device, *pSwapchain, &n, pt.images.data());
+        std::lock_guard<std::mutex> lock(g_mu);
+        // Retire old handle if the app recycled via oldSwapchain.
+        if (ci.oldSwapchain != VK_NULL_HANDLE) g_passthrough.erase(keyOf(ci.oldSwapchain));
+        g_passthrough[keyOf(*pSwapchain)] = std::move(pt);
+    }
+    return r;
+}
+
+bool ensureOverlaySync(DeviceData* dd) {
+    if (g_overlaySyncReady) return true;
+    if (!dd || !dd->dgpuReady || !dd->CreateSemaphore || !dd->CreateFence) return false;
+    dd->dgpu.loadDispatch();
+    auto& d = dd->dgpu.vk;
+    if (!dd->dgpu.cmdPool || !d.AllocateCommandBuffers) return false;
+    VkSemaphoreCreateInfo sci{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+    VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    fci.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+    if (dd->CreateSemaphore(dd->device, &sci, nullptr, &g_overlayDoneSem) != VK_SUCCESS)
+        return false;
+    if (dd->CreateFence(dd->device, &fci, nullptr, &g_overlayFence) != VK_SUCCESS) return false;
+    // Own cmd buffer — never resetAndBegin() (that steals dgpu.fence → hang on toast).
+    VkCommandBufferAllocateInfo cai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    cai.commandPool = dd->dgpu.cmdPool;
+    cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cai.commandBufferCount = 1;
+    if (d.AllocateCommandBuffers(dd->dgpu.device, &cai, &g_overlayCmd) != VK_SUCCESS) return false;
+    g_overlaySyncReady = true;
+    return true;
+}
+
+// Identity present has no FSR proxy — still blit the F10/toast strip onto the WSI.
+// Returns true if this path presented (outPr set); false → caller should present normally.
+bool queuePresentWithOverlay(DeviceData* dd, VkQueue queue, const VkPresentInfoKHR* pPresentInfo,
+                             const char* status, VkResult* outPr) {
+    if (!dd || !pPresentInfo || !status || !status[0] || !outPr) return false;
+    if (pPresentInfo->swapchainCount != 1 || !pPresentInfo->pSwapchains ||
+        !pPresentInfo->pImageIndices)
+        return false;
+    if (!dd->dgpuReady || !dd->QueueSubmit || !dd->QueuePresentKHR) return false;
+
+    PassthroughSc pt{};
+    {
+        std::lock_guard<std::mutex> lock(g_mu);
+        auto it = g_passthrough.find(keyOf(pPresentInfo->pSwapchains[0]));
+        if (it == g_passthrough.end()) return false;
+        pt = it->second;
+    }
+    const uint32_t idx = pPresentInfo->pImageIndices[0];
+    if (idx >= pt.images.size() || pt.w < 64 || pt.h < 32) return false;
+    if (!pt.transferDst) {
+        if (!g_loggedOverlaySkip) {
+            g_loggedOverlaySkip = true;
+            std::fprintf(stderr,
+                         "[xfsr] overlay skipped — swapchain has no TRANSFER_DST "
+                         "(identity present)\n");
+        }
+        return false;
+    }
+    if (!ensureOverlaySync(dd)) return false;
+
+    dd->dgpu.loadDispatch();
+    auto& d = dd->dgpu.vk;
+    if (!d.ResetCommandBuffer || !d.BeginCommandBuffer || !d.EndCommandBuffer || !d.QueueSubmit)
+        return false;
+
+    if (dd->WaitForFences(dd->device, 1, &g_overlayFence, VK_TRUE, UINT64_MAX) != VK_SUCCESS)
+        return false;
+    if (dd->ResetFences(dd->device, 1, &g_overlayFence) != VK_SUCCESS) return false;
+    if (d.ResetCommandBuffer(g_overlayCmd, 0) != VK_SUCCESS) return false;
+    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    if (d.BeginCommandBuffer(g_overlayCmd, &bi) != VK_SUCCESS) return false;
+
+    // UNDEFINED: app left PRESENT_SRC, but don't require exact oldLayout match.
+    transitionImage(&dd->dgpu, g_overlayCmd, pt.images[idx], VK_IMAGE_LAYOUT_UNDEFINED,
+                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT, 0, VK_ACCESS_TRANSFER_WRITE_BIT);
+    if (!xfsr_ctrl::recordOverlay(&dd->overlay, &dd->dgpu, g_overlayCmd, pt.images[idx], pt.w, pt.h,
+                                  status)) {
+        d.EndCommandBuffer(g_overlayCmd);
+        // Leave fence signaled so the next attempt can proceed.
+        VkSubmitInfo mark{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        d.QueueSubmit(dd->dgpu.graphicsQueue, 1, &mark, g_overlayFence);
+        return false;
+    }
+    transitionImage(&dd->dgpu, g_overlayCmd, pt.images[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                    VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, 0);
+    if (d.EndCommandBuffer(g_overlayCmd) != VK_SUCCESS) return false;
+
+    std::vector<VkPipelineStageFlags> stages;
+    if (pPresentInfo->waitSemaphoreCount > 0)
+        stages.assign(pPresentInfo->waitSemaphoreCount, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    si.waitSemaphoreCount = pPresentInfo->waitSemaphoreCount;
+    si.pWaitSemaphores = pPresentInfo->pWaitSemaphores;
+    si.pWaitDstStageMask = stages.empty() ? nullptr : stages.data();
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &g_overlayCmd;
+    si.signalSemaphoreCount = 1;
+    si.pSignalSemaphores = &g_overlayDoneSem;
+    if (d.QueueSubmit(dd->dgpu.graphicsQueue, 1, &si, g_overlayFence) != VK_SUCCESS) return false;
+
+    VkPresentInfoKHR pi = *pPresentInfo;
+    pi.waitSemaphoreCount = 1;
+    pi.pWaitSemaphores = &g_overlayDoneSem;
+    *outPr = dd->QueuePresentKHR(queue, &pi);
+    return true;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSwapchainKHR(VkDevice device,
@@ -1503,6 +1804,11 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSwapchainKHR(VkDevice device,
     ps->compositeAlpha = pCreateInfo->compositeAlpha;
     ps->presentMode = pCreateInfo->presentMode;
     ps->clipped = pCreateInfo->clipped;
+
+    // Apply hotkey preset scale here (not during present — live caps-shrink → Zink recreate crash).
+    if (dd->inst && xfsr_ctrl::enabled()) {
+        dd->inst->scale = xfsr_ctrl::peek().scale;
+    }
 
     // App sizes framebuffers to imageExtent — proxy images must match that (or DEVICE_LOST).
     // Real WSI must match the *window* size. Never invent display=app*scale: on Wayland
@@ -1608,7 +1914,19 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSwapchainKHR(VkDevice device,
             logv("[xfsr] force-scale: app %ux%u → render %ux%u display %ux%u\n", appW, appH,
                  ps->renderW, ps->renderH, winW, winH);
         } else if (rw < winW || rh < winH) {
-            logv("[xfsr] force-scale skipped (app %ux%u == window; enable caps-shrink)\n", appW,
+            // App created at full window size (typical exclusive fullscreen / DXVK).
+            // Shrinking proxy images below the app framebuffer size DEVICE_LOSTs —
+            // need caps-shrink so the game asks for a smaller swapchain, or use
+            // borderless windowed. Exclusive modes often fix min==max==current.
+            if (!dd->loggedFixedCaps) {
+                dd->loggedFixedCaps = true;
+                std::fprintf(stderr,
+                             "[xfsr] no FSR shrink at %ux%u (app == display). Exclusive "
+                             "fullscreen often locks surface size — use borderless "
+                             "windowed, or lower in-game resolution below the display.\n",
+                             appW, appH);
+            }
+            logv("[xfsr] force-scale skipped (app %ux%u == window; need caps-shrink)\n", appW,
                  appH);
         }
     } else {
@@ -1741,6 +2059,10 @@ VKAPI_ATTR void VKAPI_CALL xfsr_DestroySwapchainKHR(VkDevice device, VkSwapchain
         destroyProxy(ps);
         return;
     }
+    {
+        std::lock_guard<std::mutex> lock(g_mu);
+        g_passthrough.erase(keyOf(swapchain));
+    }
     if (dd) dd->DestroySwapchainKHR(device, swapchain, pAllocator);
 }
 
@@ -1782,6 +2104,21 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_AcquireNextImageKHR(VkDevice device, VkSwapc
         if (dit != g_devices.end()) dd = dit->second;
     }
     if (ps && ps->pipelineReady) {
+        if (xfsr_ctrl::enabled()) {
+            xfsr_ctrl::Snapshot ctrl = xfsr_ctrl::poll();
+            if (ctrl.retryOffload && dd) {
+                dd->forceRoundTripOffload = false;
+                dd->igpuFailed = false;
+                xfsr_ctrl::clearRetryOffload();
+            }
+            // F4 applied in QueuePresent (holds g_proxyLife); don't clear here.
+            // F1 preset: push scale then OUT_OF_DATE so the next create honors it.
+            if (ctrl.recreateSwapchain) {
+                if (dd && dd->inst) dd->inst->scale = ctrl.scale;
+                xfsr_ctrl::clearRecreateRequest();
+                return VK_ERROR_OUT_OF_DATE_KHR;
+            }
+        }
         // Fake acquire: pick next app image, but WAIT until the last present/FSR that
         // read it has finished — otherwise the app redraws into an image still sampled
         // by our present cmd (NVIDIA DEVICE_LOST; xfsr_load_vk "wait failed (-4)").
@@ -1988,6 +2325,44 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
         if (ps) dd = ps->dev;
     }
 
+    // Hotkeys / control file even on identity (no proxy) so preset can take effect
+    // on the next CreateSwapchain.
+    xfsr_ctrl::Snapshot ctrl{};
+    if (xfsr_ctrl::enabled()) {
+        ctrl = xfsr_ctrl::poll();
+        {
+            std::lock_guard<std::mutex> lock(g_mu);
+            if (!dd && !g_devices.empty()) dd = g_devices.begin()->second;
+        }
+        if (ctrl.retryOffload && dd) {
+            dd->forceRoundTripOffload = false;
+            dd->igpuFailed = false;
+            xfsr_ctrl::clearRetryOffload();
+        }
+        // F4: same-GPU ↔ round-trip offload (keeps dGPU WSI). Drop this frame —
+        // continuing present after tearing down FSR/xfer calls null ICD entry points.
+        if (ctrl.reconfigureOffload && ps && ps->pipelineReady) {
+            xfsr_ctrl::clearReconfigureOffload();
+            reconfigureOffloadPresentPath(ps);
+            life.unlock();
+            if (pPresentInfo->pResults) {
+                for (uint32_t i = 0; i < pPresentInfo->swapchainCount; ++i)
+                    pPresentInfo->pResults[i] = VK_SUCCESS;
+            }
+            return VK_SUCCESS;
+        }
+        // F1: OUT_OF_DATE only when a proxy is live (scale can apply). Identity /
+        // fullscreen-locked benches exit on OUT_OF_DATE — keep running, store scale.
+        if (ctrl.recreateSwapchain) {
+            if (dd && dd->inst) dd->inst->scale = ctrl.scale;
+            xfsr_ctrl::clearRecreateRequest();
+            if (ps && ps->pipelineReady) {
+                life.unlock();
+                return VK_ERROR_OUT_OF_DATE_KHR;
+            }
+        }
+    }
+
     if (!ps || !ps->pipelineReady || !dd) {
         life.unlock();
         // One-shot OUT_OF_DATE after Wayland identity create so Zink recreates
@@ -2000,6 +2375,11 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
                 logv("[xfsr] zink shrink kick: OUT_OF_DATE to recreate at render size\n");
                 return VK_ERROR_OUT_OF_DATE_KHR;
             }
+        }
+        // Identity / passthrough: still draw F10 overlay (proxy path does this above).
+        if (dd && xfsr_ctrl::enabled() && ctrl.showOverlay && ctrl.status[0]) {
+            VkResult opr = VK_SUCCESS;
+            if (queuePresentWithOverlay(dd, queue, pPresentInfo, ctrl.status, &opr)) return opr;
         }
         if (dd && dd->QueuePresentKHR) return dd->QueuePresentKHR(queue, pPresentInfo);
         std::lock_guard<std::mutex> lock(g_mu);
@@ -2017,6 +2397,26 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
     VkSemaphore acqSem = ps->imageAvailable[slot];
     VkSemaphore doneSem = ps->renderFinished[slot];
     DeviceContext& presentCtx = presentsOnIgpu(ps) ? dd->igpu : dd->dgpu;
+
+    // Live-safe: RCAS + FSR↔blit when the FSR pass already exists. Preset scale
+    // (F1) uses recreateSwapchain above; F5 one-way still needs restart.
+    if (xfsr_ctrl::enabled() && ps->fsr.ctx) {
+        ps->fsr.enableRcas = ctrl.rcas;
+        const bool scaling = ps->renderW != ps->displayW || ps->renderH != ps->displayH;
+        if (scaling) {
+            // Enabling FSR after blit-only / reconfigure-with-FSR-off may lack outputs.
+            if (ctrl.fsr && (ps->fsr.displayW == 0 || !ps->fsr.easuOut[0].image)) {
+                try {
+                    waitPresentRing(ps, presentCtx);
+                    waitOffloadIdle(dd);
+                    ps->fsr.resize(ps->renderW, ps->renderH, ps->displayW, ps->displayH);
+                } catch (const std::exception& e) {
+                    std::fprintf(stderr, "[xfsr] live FSR enable failed: %s\n", e.what());
+                }
+            }
+            ps->useFsr = ctrl.fsr && ps->fsr.displayW != 0 && ps->fsr.easuOut[0].image;
+        }
+    }
 
     try {
         const GpuImage* frameImg = &ps->appImages[idx];
@@ -2067,29 +2467,50 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
         if (!wsi.AcquireNextImageKHR || !wsi.QueuePresentKHR) return VK_ERROR_DEVICE_LOST;
 
         // Recycle present cmd slot (may be a prior appImgFence on the same device).
+        // Wait only — reset the submit fence immediately before QueueSubmit. Resetting
+        // appImgFence then bailing on OUT_OF_DATE left it unsignaled → fake acquire
+        // WaitForFences(UINT64_MAX) freezes the app (seen on glmark2 after SUBOPTIMAL).
         dd->dgpu.loadDispatch();
         auto& dgpuVk = dd->dgpu.vk;
-        if (ps->lastCmdFence[slot]) {
-            vkCheck(dgpuVk.WaitForFences(dd->dgpu.device, 1, &ps->lastCmdFence[slot], VK_TRUE,
-                                         UINT64_MAX),
-                    "wait cmd slot");
-        } else {
-            vkCheck(pd.WaitForFences(presentCtx.device, 1, &fence, VK_TRUE, UINT64_MAX), "wait");
+        VkFence slotWait = ps->lastCmdFence[slot] ? ps->lastCmdFence[slot] : fence;
+        if (slotWait) {
+            if (ps->lastCmdFence[slot]) {
+                vkCheck(dgpuVk.WaitForFences(dd->dgpu.device, 1, &slotWait, VK_TRUE, UINT64_MAX),
+                        "wait cmd slot");
+            } else {
+                vkCheck(pd.WaitForFences(presentCtx.device, 1, &slotWait, VK_TRUE, UINT64_MAX),
+                        "wait");
+            }
         }
-        vkCheck(pd.ResetFences(presentCtx.device, 1, &fence), "reset present-ring fence");
         VkFence imgRelease = VK_NULL_HANDLE;
         if (idx < ps->appImgFence.size()) imgRelease = ps->appImgFence[idx];
-        if (imgRelease) {
+        if (imgRelease && imgRelease != slotWait) {
             vkCheck(dgpuVk.WaitForFences(dd->dgpu.device, 1, &imgRelease, VK_TRUE, UINT64_MAX),
                     "wait app img");
-            vkCheck(dgpuVk.ResetFences(dd->dgpu.device, 1, &imgRelease), "reset app img fence");
         }
 
         uint32_t realIdx = 0;
-        VkResult acq = wsi.AcquireNextImageKHR(presentCtx.device, ps->realSwapchain, UINT64_MAX,
+        // Finite timeout when the app owns WSI — UINT64_MAX hangs forever if images
+        // were leaked by previously swallowed OUT_OF_DATE presents.
+        const uint64_t acqTimeoutNs = appOwnsRealWsi(ps) ? 1000000000ull : UINT64_MAX;
+        VkResult acq = wsi.AcquireNextImageKHR(presentCtx.device, ps->realSwapchain, acqTimeoutNs,
                                                acqSem, VK_NULL_HANDLE, &realIdx);
+        if (acq == VK_TIMEOUT) {
+            static bool loggedTo = false;
+            if (!loggedTo) {
+                loggedTo = true;
+                std::fprintf(stderr,
+                             "[xfsr] proxy acquire timed out — returning OUT_OF_DATE "
+                             "(recreate WSI)\n");
+            }
+            return VK_ERROR_OUT_OF_DATE_KHR;
+        }
         if (acq == VK_ERROR_OUT_OF_DATE_KHR) {
-            // Window surface churn (dual-GPU / compositor). Don't force app recreate.
+            if (appOwnsRealWsi(ps)) {
+                // App must recreate — we share the real swapchain handle.
+                return VK_ERROR_OUT_OF_DATE_KHR;
+            }
+            // Opaque dual-GPU: we own real WSI; don't force app recreate.
             static bool loggedAcq = false;
             if (!loggedAcq) {
                 loggedAcq = true;
@@ -2230,6 +2651,23 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
                                 &blit, VK_FILTER_LINEAR);
             }
 
+            if (xfsr_ctrl::enabled() && ctrl.showOverlay && ctrl.status[0]) {
+                xfsr_ctrl::recordOverlay(&dd->overlay, &presentCtx, cmd, ps->realImages[realIdx],
+                                         ps->displayW, ps->displayH, ctrl.status);
+            }
+
+            transitionImage(&presentCtx, cmd, ps->realImages[realIdx],
+                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                            VK_ACCESS_TRANSFER_WRITE_BIT, 0);
+        } else if (xfsr_ctrl::enabled() && ctrl.showOverlay && ctrl.status[0]) {
+            // Direct-to-swapchain FSR left PRESENT_SRC — briefly steal TRANSFER_DST.
+            transitionImage(&presentCtx, cmd, ps->realImages[realIdx],
+                            VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                            VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+            xfsr_ctrl::recordOverlay(&dd->overlay, &presentCtx, cmd, ps->realImages[realIdx],
+                                     ps->displayW, ps->displayH, ctrl.status);
             transitionImage(&presentCtx, cmd, ps->realImages[realIdx],
                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
                             VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
@@ -2266,6 +2704,11 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
         // wait for FSR/blit to finish reading that image. Fall back to present-ring fence.
         VkFence submitFence = fence;
         if (imgRelease && presentCtx.device == dd->dgpu.device) submitFence = imgRelease;
+        if (submitFence == fence) {
+            vkCheck(pd.ResetFences(presentCtx.device, 1, &fence), "reset present-ring fence");
+        } else {
+            vkCheck(dgpuVk.ResetFences(dd->dgpu.device, 1, &submitFence), "reset app img fence");
+        }
         vkCheck(pd.QueueSubmit(presentCtx.presentQueue ? presentCtx.presentQueue
                                                        : presentCtx.graphicsQueue,
                                1, &si, submitFence),
@@ -2274,6 +2717,7 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
         if (imgRelease && submitFence != imgRelease) {
             // Present on another device: mark image free after a dGPU no-op wait for
             // prior transfer work (round-trip / classic already finished the download).
+            vkCheck(dgpuVk.ResetFences(dd->dgpu.device, 1, &imgRelease), "reset app img mark");
             VkSubmitInfo mark{VK_STRUCTURE_TYPE_SUBMIT_INFO};
             vkCheck(dgpuVk.QueueSubmit(dd->dgpu.graphicsQueue, 1, &mark, imgRelease),
                     "signal app img release");
@@ -2323,15 +2767,23 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
             for (uint32_t i = 0; i < pPresentInfo->swapchainCount; ++i)
                 pPresentInfo->pResults[i] = VK_SUCCESS;
         }
-        // Swallow SUBOPTIMAL / OUT_OF_DATE. Returning them makes the app recreate every
-        // frame (especially dual-GPU). We own the real WSI; keep presenting.
-        if (pr == VK_SUBOPTIMAL_KHR || pr == VK_ERROR_OUT_OF_DATE_KHR) {
+        // Same-GPU: app owns the real WSI — must propagate OUT_OF_DATE or images leak
+        // and the next acquire hangs. Opaque dual-GPU: we own WSI; swallow + keep going.
+        // SUBOPTIMAL is safe to treat as SUCCESS for both (keep presenting).
+        if (pr == VK_ERROR_OUT_OF_DATE_KHR) {
+            if (appOwnsRealWsi(ps)) return VK_ERROR_OUT_OF_DATE_KHR;
+            static bool loggedOd = false;
+            if (!loggedOd) {
+                loggedOd = true;
+                std::fprintf(stderr, "[xfsr] ignoring VK_ERROR_OUT_OF_DATE_KHR on proxy present\n");
+            }
+            return VK_SUCCESS;
+        }
+        if (pr == VK_SUBOPTIMAL_KHR) {
             static bool loggedSub = false;
             if (!loggedSub) {
                 loggedSub = true;
-                std::fprintf(stderr, "[xfsr] ignoring %s on proxy present\n",
-                             pr == VK_SUBOPTIMAL_KHR ? "VK_SUBOPTIMAL_KHR"
-                                                     : "VK_ERROR_OUT_OF_DATE_KHR");
+                std::fprintf(stderr, "[xfsr] ignoring VK_SUBOPTIMAL_KHR on proxy present\n");
             }
             return VK_SUCCESS;
         }

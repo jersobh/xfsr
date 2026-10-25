@@ -6,7 +6,7 @@
 
 FSR 1.0 for Linux games — wrap a title like `gamemoderun`, get more FPS by rendering lower and upscaling.
 
-**Current version:** [0.3.1](https://github.com/jersobh/xfsr/releases/tag/v0.3.1)
+**Current version:** [0.4.0](https://github.com/jersobh/xfsr/releases/tag/v0.4.0)
 
 ## What it does
 
@@ -23,7 +23,7 @@ You do **not** need the game to support FSR. xfsr hooks in through a **Vulkan la
 | Mode | How | When to use |
 |------|-----|-------------|
 | **Same-GPU FSR** (default) | Game renders low-res on the GPU it already uses; that same GPU runs FSR and presents | Most games — usually the fastest and most stable |
-| **`--offload`** | Discrete GPU renders low-res; iGPU runs FSR. Prefers **one-way** iGPU present on Mesa dGPUs; **NVIDIA hybrids default to round-trip** (dGPU keeps the window WSI, frame hauled back after FSR). Transfer uses dma-buf when safe, else shared-host import | Hybrid laptops / experimentation — same-GPU is still usually faster |
+| **`--offload`** | Discrete GPU renders low-res; iGPU runs FSR (**round-trip** on NVIDIA: dGPU keeps the window). Toggle live with **F4**. **One-way** iGPU present (Mesa / `XFSR_IGPU_PRESENT=force`) needs restart. Same-GPU is usually faster | Hybrid laptops — works; expect lower FPS than same-GPU FSR |
 
 Presets control how hard it pushes:
 
@@ -87,13 +87,43 @@ xfsr-run --zink --preset performance --no-rcas glmark2
 | `--offload` | Upscale on the iGPU (hybrid; skip for CS2) |
 | `--one-way` / `--no-one-way` | With offload: prefer iGPU present or force round-trip (`--one-way` implies `--offload`; ignored on NVIDIA — use `XFSR_IGPU_PRESENT=force` to override) |
 | `--mangohud` | FPS / frametime overlay |
+| `--controls` / `--no-controls` | In-game hotkeys + status toast (default on) |
 | `--zink` | OpenGL via Zink + viewport shim (off by default) |
 | `--print` | Show the env xfsr would set, then exit |
+
+### In-game controls (default on)
+
+| Key | Action |
+|-----|--------|
+| **F1** | Cycle preset (**live** via swapchain recreate when the title handles `OUT_OF_DATE`) |
+| **F2** | Toggle RCAS sharpening (**live**) |
+| **F3** | Toggle FSR ↔ blit (**live** when the FSR pass exists) |
+| **F4** | Toggle offload same-GPU ↔ round-trip (**live**; brief hitch) |
+| **F5** | Toggle one-way preference (**restart** to move WSI) |
+| **F10** | Pin / unpin the status overlay (**live**) |
+
+A toast appears for a few seconds after each change (and stays if pinned). Keys are read via X11 and/or `/dev/input` (evdev). Set `XFSR_HUD_MOD=1` if you want **Shift+F*** to avoid clashing with game binds. If hotkeys still do nothing, check the console for `hotkeys: x11=… evdev=…` and use the control file:
+
+```sh
+echo preset ultra > "$XDG_RUNTIME_DIR/xfsr-control"
+echo rcas 0 >> "$XDG_RUNTIME_DIR/xfsr-control"
+```
+
+Commands: `preset …`, `cycle_preset`, `rcas 0|1`, `fsr 0|1`, `offload 0|1`, `one-way 0|1`,
+`overlay 0|1`, `status`. `offload` applies live (round-trip); `one-way` needs a restart.
+
+**Exclusive fullscreen:** many drivers fix the swapchain size (`minExtent == maxExtent`),
+so xfsr cannot ask the game to render lower. Prefer **borderless windowed** (or set an
+in-game resolution below the display). If you see
+`no FSR shrink … Exclusive fullscreen`, that is why.
 
 Offload knobs (env; same as the flags above):
 
 | Env | Effect |
 |-----|--------|
+| `XFSR_HUD=0` | Disable in-game controls / overlay |
+| `XFSR_HUD_MOD=1` | Require Shift+F* for hotkeys (default: bare F-keys) |
+| `XFSR_CONTROL=/path` | Override control-file path (default `$XDG_RUNTIME_DIR/xfsr-control`) |
 | `XFSR_IGPU_PRESENT=0` | Force round-trip (dGPU WSI) — same as `--no-one-way` |
 | `XFSR_IGPU_PRESENT=1` | Prefer one-way (Mesa); on NVIDIA falls back to round-trip |
 | `XFSR_IGPU_PRESENT=force` | Actually try one-way on NVIDIA (often SIGSEGV with MangoHud) |
@@ -119,12 +149,12 @@ Needs CMake ≥ 3.20, C++17, `glslc`, Vulkan loader. FSR1 headers: `third_party/
 
 ## Versioning
 
-- [`VERSION`](VERSION) — **0.3.1**
+- [`VERSION`](VERSION) — **0.4.0**
 - [`CHANGELOG.md`](CHANGELOG.md)
 - Tag `vX.Y.Z` → GitHub Actions builds the Linux package the install script downloads
 
 ```sh
-git tag v0.3.1 && git push origin v0.3.1
+git tag v0.4.0 && git push origin v0.4.0
 ```
 
 ## Credits

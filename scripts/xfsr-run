@@ -40,6 +40,8 @@ OFFLOAD_CLI=0
 ONE_WAY=""
 ONE_WAY_CLI=0
 RCAS="${XFSR_RCAS:-${CROSSVULKAN_RCAS:-1}}"
+# In-game hotkeys + status overlay (default on). XFSR_HUD=0 / --no-controls to disable.
+HUD="${XFSR_HUD:-1}"
 
 if [[ "${XFSR_MANGOHUD:-0}" == "1" ]]; then
   USE_MANGOHUD=1
@@ -67,6 +69,10 @@ Options:
                                           round-trip; implies --offload. On NVIDIA, --one-way
                                           is ignored (SIGSEGV); XFSR_IGPU_PRESENT=force to try.
   --rcas / --no-rcas                      FSR1 sharpening pass (default: on; --no-rcas = EASU only)
+  --controls / --no-controls              In-game hotkeys + status toast (default: on)
+                                          F1 preset, F2 RCAS, F3 FSR, F4 offload, F5 one-way,
+                                          F10 pin (XFSR_HUD_MOD=1 → require Shift). Control:
+                                          echo 'offload 1' > \$XDG_RUNTIME_DIR/xfsr-control
   --zink / --no-zink                      Mesa Zink for OpenGL→Vulkan (default: auto —
                                           on for glmark2/native GL, off for Proton/Vulkan)
   --mangohud / --hud                      FPS/frametime overlay (GL preload and/or Vulkan layer)
@@ -120,6 +126,8 @@ while [[ $# -gt 0 ]]; do
     --no-one-way) ONE_WAY=0; ONE_WAY_CLI=1; shift ;;
     --rcas) RCAS=1; shift ;;
     --no-rcas) RCAS=0; shift ;;
+    --controls) HUD=1; shift ;;
+    --no-controls) HUD=0; shift ;;
     --layer-dir)
       LAYER_DIR="${2:?}"; shift 2 ;;
     --layer-dir=*) LAYER_DIR="${1#*=}"; shift ;;
@@ -390,8 +398,13 @@ export XFSR_FSR="$FSR"
 export XFSR_PRESET="$PRESET"
 export XFSR_OFFLOAD="$OFFLOAD"
 export XFSR_RCAS="$RCAS"
+export XFSR_HUD="$HUD"
+# Do NOT inherit ambient XFSR_IGPU_PRESENT=force from the shell — that silently
+# enables one-way + offload and SIGSEGVs with MangoHud on NVIDIA.
 if [[ $ONE_WAY_CLI -eq 1 ]]; then
   export XFSR_IGPU_PRESENT="$ONE_WAY"
+else
+  unset XFSR_IGPU_PRESENT 2>/dev/null || true
 fi
 # Wayland: ICD currentExtent is often UINT_MAX — seed the layer so caps-shrink works
 # on the first CreateSwapchain (otherwise identity @ full res, flat bench FPS).
@@ -455,6 +468,27 @@ else
   # Do NOT set DRI_PRIME=1 — on NVIDIA+AMD hybrids it forces the iGPU / breaks Proton.
   unset DRI_PRIME 2>/dev/null || true
   echo "xfsr-run: Vulkan/Proton path (no Zink). OpenGL titles need --zink for FSR." >&2
+  # Wayland WSI often reports currentExtent=UINT_MAX. The layer will not shrink from
+  # DISPLAY_EXTENT alone (postage-stamp guard) → apps create at window size → no FSR
+  # and flat FPS. Prefer X11 when both are available (same rationale as Zink).
+  # Keep Wayland: XFSR_VK_WAYLAND=1, or Wayland-only titles (*-wayland).
+  _cmd_base="$(basename -- "${1:-}" 2>/dev/null || true)"
+  _keep_wl=0
+  if [[ "${XFSR_VK_WAYLAND:-}" == "1" ]]; then
+    _keep_wl=1
+  elif [[ "${XFSR_VK_WAYLAND:-}" != "0" ]]; then
+    case "$_cmd_base" in
+      *-wayland|wayland*|*wayland*) _keep_wl=1 ;;
+    esac
+  fi
+  unset _cmd_base
+  if [[ -n "${WAYLAND_DISPLAY:-}" && -n "${DISPLAY:-}" && $_keep_wl -eq 0 ]]; then
+    unset WAYLAND_DISPLAY WAYLAND_SOCKET
+    echo "xfsr-run: Vulkan FSR prefers X11 — cleared WAYLAND_DISPLAY (XFSR_VK_WAYLAND=1 to keep)." >&2
+  elif [[ -n "${WAYLAND_DISPLAY:-}" && $_keep_wl -eq 1 ]]; then
+    echo "xfsr-run: keeping Wayland for Vulkan (XFSR_VK_WAYLAND=1 / wayland binary)." >&2
+  fi
+  unset _keep_wl
 fi
 
 # Dual-GPU: keep both ICDs visible (do not set VK_ICD_FILENAMES to one GPU).

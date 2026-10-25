@@ -3,6 +3,7 @@
 //
 // Usage:
 //   ./build/xfsr_load_gl [--seconds N] [--complexity N] [--width W] [--height H]
+//                        [--fullscreen|--windowed]
 //   xfsr-run --preset performance ./build/xfsr_load_gl --seconds 8
 
 #define GLFW_INCLUDE_NONE
@@ -244,14 +245,18 @@ int main(int argc, char** argv) {
     int seconds = 8;
     int complexity = 64;
     int winW = 1920, winH = 1080;
+    bool fullscreen = false;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--seconds" && i + 1 < argc) seconds = std::atoi(argv[++i]);
         else if (a == "--complexity" && i + 1 < argc) complexity = std::atoi(argv[++i]);
         else if (a == "--width" && i + 1 < argc) winW = std::atoi(argv[++i]);
         else if (a == "--height" && i + 1 < argc) winH = std::atoi(argv[++i]);
+        else if (a == "--fullscreen" || a == "-f") fullscreen = true;
+        else if (a == "--windowed") fullscreen = false;
         else if (a == "-h" || a == "--help") {
-            std::printf("Usage: xfsr_load_gl [--seconds N] [--complexity N] [--width W] [--height H]\n");
+            std::printf("Usage: xfsr_load_gl [--seconds N] [--complexity N] [--width W] [--height H]\n"
+                        "                    [--fullscreen|--windowed]\n");
             return 0;
         }
     }
@@ -263,7 +268,19 @@ int main(int argc, char** argv) {
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     glfwWindowHint(GLFW_DOUBLEBUFFER, GLFW_TRUE);
     glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
-    GLFWwindow* window = glfwCreateWindow(winW, winH, "xfsr_load_gl (uncapped)", nullptr, nullptr);
+    GLFWmonitor* monitor = nullptr;
+    if (fullscreen) {
+        monitor = glfwGetPrimaryMonitor();
+        if (monitor) {
+            const GLFWvidmode* mode = glfwGetVideoMode(monitor);
+            if (mode) {
+                winW = mode->width;
+                winH = mode->height;
+            }
+        }
+    }
+    GLFWwindow* window =
+        glfwCreateWindow(winW, winH, "xfsr_load_gl (uncapped)", monitor, nullptr);
     if (!window) die("glfwCreateWindow");
     glfwMakeContextCurrent(window);
     glfwSwapInterval(0);
