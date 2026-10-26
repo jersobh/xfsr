@@ -21,8 +21,20 @@ mkdir -p "$PREFIX/bin" "$PREFIX/lib" \
   "$PREFIX/share/xfsr/shaders"
 
 install -m 755 "$ROOT/scripts/xfsr-run" "$PREFIX/bin/xfsr-run"
+install -m 755 "$ROOT/scripts/xfsr-auto-tune" "$PREFIX/bin/xfsr-auto-tune"
+install -m 755 "$ROOT/scripts/xfsr-gamescope-focus" "$PREFIX/bin/xfsr-gamescope-focus"
 install -m 755 "$BUILD/libVkLayer_XFSR.so" "$PREFIX/lib/libVkLayer_XFSR.so"
 install -m 755 "$BUILD/libxfsr_gl_shim.so" "$PREFIX/lib/libxfsr_gl_shim.so"
+if [[ -f "$ROOT/share/xfsr/profiles.example.conf" ]]; then
+  install -m 644 "$ROOT/share/xfsr/profiles.example.conf" \
+    "$PREFIX/share/xfsr/profiles.example.conf"
+fi
+mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/xfsr"
+if [[ ! -f "${XDG_CONFIG_HOME:-$HOME/.config}/xfsr/profiles.conf" \
+      && -f "$ROOT/share/xfsr/profiles.example.conf" ]]; then
+  install -m 644 "$ROOT/share/xfsr/profiles.example.conf" \
+    "${XDG_CONFIG_HOME:-$HOME/.config}/xfsr/profiles.conf"
+fi
 
 # Drop pre-rename layer artifacts so the loader does not load two XFSR layers.
 rm -f "$PREFIX/lib/libVkLayer_CROSSVULKAN_xfsr.so" \
@@ -30,7 +42,8 @@ rm -f "$PREFIX/lib/libVkLayer_CROSSVULKAN_xfsr.so" \
 
 # FSR (+ blit) SPIR-V the layer loads via XFSR_SHADER_DIR
 shopt -s nullglob
-for f in "$BUILD"/shaders/fsr_*.spv "$BUILD"/shaders/blit.*.spv; do
+for f in "$BUILD"/shaders/fsr_*.spv "$BUILD"/shaders/nis_*.spv \
+         "$BUILD"/shaders/edge_*.spv "$BUILD"/shaders/blit.*.spv; do
   install -m 644 "$f" "$PREFIX/share/xfsr/shaders/"
 done
 shopt -u nullglob
@@ -58,13 +71,18 @@ PY
 echo
 echo "Installed:"
 echo "  $PREFIX/bin/xfsr-run"
+echo "  $PREFIX/bin/xfsr-auto-tune"
 echo "  $PREFIX/lib/libVkLayer_XFSR.so"
 echo "  $PREFIX/lib/libxfsr_gl_shim.so"
 echo "  $PREFIX/share/vulkan/implicit_layer.d/VkLayer_XFSR.json"
 echo "  $PREFIX/share/xfsr/shaders/"
+echo "  $PREFIX/share/xfsr/profiles.example.conf"
 echo
 if ! command -v xfsr-run >/dev/null 2>&1; then
   echo "Add to PATH if needed:  export PATH=\"$PREFIX/bin:\$PATH\""
 fi
+echo "Profiles:             ~/.config/xfsr/profiles.conf  (auto-created from example)"
+echo "Auto-tune:            xfsr-auto-tune --apply"
+echo "Roadmap:              $ROOT/ROADMAP.md"
 echo "Steam launch option:  xfsr-run --mangohud --preset performance --no-rcas %command%"
 echo "Smoke test:           xfsr-run --print true"

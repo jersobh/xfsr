@@ -18,6 +18,8 @@
 #include "frame_transfer.hpp"
 #include "fsr_pass.hpp"
 #include "gpu_image.hpp"
+#include "nis_pass.hpp"
+#include "edge_pass.hpp"
 #include "offload_roundtrip.hpp"
 #include "xfsr_controls.hpp"
 
@@ -183,11 +185,47 @@ bool layerFsrPassEnabled() {
     return fsrEnabled();
 }
 
+xfsr_ctrl::Upscaler resolveUpscaler() {
+    if (xfsr_ctrl::enabled()) return xfsr_ctrl::peek().upscaler;
+    if (const char* u = xfsrEnv("XFSR_UPSCALER", "CROSSVULKAN_UPSCALER")) {
+        if (u[0]) {
+            if (std::strcmp(u, "edge") == 0 || u[0] == '3') return xfsr_ctrl::Upscaler::Edge;
+            if (std::strcmp(u, "nis") == 0 || u[0] == '2') return xfsr_ctrl::Upscaler::Nis;
+            if (std::strcmp(u, "blit") == 0 || u[0] == '0') return xfsr_ctrl::Upscaler::Blit;
+            return xfsr_ctrl::Upscaler::Fsr1;
+        }
+    }
+    return layerFsrPassEnabled() ? xfsr_ctrl::Upscaler::Fsr1 : xfsr_ctrl::Upscaler::Blit;
+}
+
+[[maybe_unused]] const char* upscalerTag(xfsr_ctrl::Upscaler u) {
+    switch (u) {
+    case xfsr_ctrl::Upscaler::Blit:
+        return "blit";
+    case xfsr_ctrl::Upscaler::Nis:
+        return "nis";
+    case xfsr_ctrl::Upscaler::Edge:
+        return "edge";
+    default:
+        return "FSR1";
+    }
+}
+
+// --hybrid / XFSR_HYBRID=1: prefer iGPU one-way + edge; never settle on round-trip.
+bool hybridWanted() {
+    if (const char* h = xfsrEnv("XFSR_HYBRID", "CROSSVULKAN_HYBRID")) {
+        if (h[0] == '1') return true;
+        if (h[0] == '0') return false;
+    }
+    return false;
+}
+
 bool offloadEnabled() {
     // Prefer explicit env — HUD peek can lag or be tainted by ambient IGPU_PRESENT.
     const char* o = xfsrEnv("XFSR_OFFLOAD", "CROSSVULKAN_OFFLOAD");
     if (o && o[0] == '0') return false;
     if (o && o[0] && o[0] != '0') return true;
+    if (hybridWanted()) return true;
     if (xfsr_ctrl::enabled()) return xfsr_ctrl::peek().offload;
     return false;
 }
@@ -354,7 +392,8 @@ struct ProxySwapchain {
     std::vector<VkImage> realImages;
     std::vector<VkImageView> realViews; // for FSR STORAGE → swapchain (when format allows)
     bool fsrDirectToSwapchain = false;
-    bool fsrDirectSwizzleBgra = false;
+    bool edgeDirectToSwapchain = false;
+    bool fsrDirectSwizzleBgra = false; // shared BGRA swizzle for FSR/edge STORAGE→WSI
     // App-facing handle MUST be on the *app* (dGPU) device. Source2 leaks some WSI
     // calls past the layer into the NVIDIA ICD — an iGPU handle there SIGSEGVs.
     // Same-GPU: appSwapchain == realSwapchain. Dual-GPU: opaqueAppHandle (pointer cast)
@@ -375,13 +414,17 @@ struct ProxySwapchain {
     VkFence lastCmdFence[kFrames]{}; // borrowed: which fence guards cmds[slot]
 
     FsrPass fsr{};
+    NisPass nis{};
+    EdgePass edge{};
     bool pipelineReady = false;
     bool offloadIgpu = false; // true: FrameTransfer → iGPU (FSR and/or present)
     // Round-trip: dGPU owns window WSI; iGPU runs FSR; frame hauled back for present.
     // One-way: iGPU owns WSI (opaque app handle). Prefer one-way; fall back on failure
     // (NVIDIA hybrids historically SIGSEGV when apps leak WSI to the wrong ICD).
     bool zinkOffloadRoundtrip = false;
-    bool useFsr = false;      // FSR1 EASU/RCAS when XFSR_FSR=1 and scaling
+    bool useFsr = false;  // FSR1 EASU/RCAS
+    bool useNis = false;  // NIS-style spatial upscaler
+    bool useEdge = false; // edge upscaler (hybrid default)
 
     std::vector<GpuImage> appImages;
     uint32_t acquireIndex = 0;
@@ -592,6 +635,7 @@ void destroyPresentRing(ProxySwapchain* ps, DeviceContext& ctx) {
     }
     ps->realViews.clear();
     ps->fsrDirectToSwapchain = false;
+    ps->edgeDirectToSwapchain = false;
 }
 
 void waitPresentRing(ProxySwapchain* ps, DeviceContext& presentCtx) {
@@ -637,6 +681,8 @@ void destroyProxy(ProxySwapchain* ps) {
     }
     if (ps->pipelineReady) {
         ps->fsr.destroy();
+        ps->nis.destroy();
+        ps->edge.destroy();
         ps->pipelineReady = false;
     }
     if (dd) destroyAppImgFences(ps, dd);
@@ -663,6 +709,8 @@ void destroyProxy(ProxySwapchain* ps) {
     ps->offloadIgpu = false;
     ps->zinkOffloadRoundtrip = false;
     ps->useFsr = false;
+    ps->useNis = false;
+    ps->useEdge = false;
     delete ps;
     // No g_mu here (DestroyDevice may already hold it). Next proxy create re-publishes.
     unsetenv("XFSR_GL_REMAP");
@@ -823,16 +871,24 @@ bool setupOffloadPipeline(ProxySwapchain* ps, VkSwapchainKHR oldPresentSwapchain
             }
         }
         // Prefer one-way iGPU present; round-trip when forced or XFSR_IGPU_PRESENT=0.
+        // Hybrid mode refuses round-trip: fall back to same-GPU instead.
         if (ps->offloadIgpu) {
             const bool wantOneWay = igpuPresentWanted(dd) && !dd->forceRoundTripOffload;
-            ps->zinkOffloadRoundtrip = !wantOneWay;
-            if (ps->zinkOffloadRoundtrip) {
-                logv("[xfsr] offload: dGPU WSI + iGPU FSR (round-trip)%s%s\n",
-                     zinkActive() ? " [zink]" : "",
-                     dd->forceRoundTripOffload ? " [forced]" : "");
+            if (!wantOneWay && hybridWanted()) {
+                std::fprintf(stderr,
+                             "[xfsr] hybrid: one-way unavailable — same-GPU edge (no round-trip)\n");
+                ps->offloadIgpu = false;
+                ps->zinkOffloadRoundtrip = false;
             } else {
-                logv("[xfsr] offload: try one-way iGPU present%s\n",
-                     zinkActive() ? " [zink]" : "");
+                ps->zinkOffloadRoundtrip = !wantOneWay;
+                if (ps->zinkOffloadRoundtrip) {
+                    logv("[xfsr] offload: dGPU WSI + iGPU FSR (round-trip)%s%s\n",
+                         zinkActive() ? " [zink]" : "",
+                         dd->forceRoundTripOffload ? " [forced]" : "");
+                } else {
+                    logv("[xfsr] offload: try one-way iGPU present%s%s\n",
+                         zinkActive() ? " [zink]" : "", hybridWanted() ? " [hybrid]" : "");
+                }
             }
         } else {
             ps->zinkOffloadRoundtrip = false;
@@ -932,12 +988,24 @@ bool setupOffloadPipeline(ProxySwapchain* ps, VkSwapchainKHR oldPresentSwapchain
         if (presentsOnIgpu(ps)) {
             cr = createPresentWsi(&dd->igpu, true, oldPresentSwapchain, &ps->realSwapchain);
             if (cr != VK_SUCCESS) {
-                std::fprintf(stderr,
-                             "[xfsr] iGPU present swapchain failed: %d — fall back to round-trip\n",
-                             static_cast<int>(cr));
-                dd->forceRoundTripOffload = true;
-                ps->zinkOffloadRoundtrip = true;
-                ps->opaqueAppHandle = false;
+                if (hybridWanted()) {
+                    std::fprintf(stderr,
+                                 "[xfsr] hybrid: iGPU present failed (%d) — same-GPU edge "
+                                 "(refusing round-trip)\n",
+                                 static_cast<int>(cr));
+                    ps->offloadIgpu = false;
+                    ps->zinkOffloadRoundtrip = false;
+                    ps->opaqueAppHandle = false;
+                    dd->forceRoundTripOffload = false;
+                } else {
+                    std::fprintf(stderr,
+                                 "[xfsr] iGPU present swapchain failed: %d — fall back to "
+                                 "round-trip\n",
+                                 static_cast<int>(cr));
+                    dd->forceRoundTripOffload = true;
+                    ps->zinkOffloadRoundtrip = true;
+                    ps->opaqueAppHandle = false;
+                }
             } else {
                 presentCtx = &dd->igpu;
                 ps->opaqueAppHandle = true;
@@ -1005,27 +1073,68 @@ bool setupOffloadPipeline(ProxySwapchain* ps, VkSwapchainKHR oldPresentSwapchain
         }
 
         {
-            const bool wantFsr =
-                scaling && (xfsr_ctrl::enabled() ? xfsr_ctrl::peek().fsr : layerFsrPassEnabled());
-            ps->useFsr = wantFsr;
+            const xfsr_ctrl::Upscaler ups = resolveUpscaler();
+            ps->useFsr = scaling && ups == xfsr_ctrl::Upscaler::Fsr1;
+            ps->useNis = scaling && ups == xfsr_ctrl::Upscaler::Nis;
+            ps->useEdge = scaling && ups == xfsr_ctrl::Upscaler::Edge;
+            if (hybridWanted() && scaling && !ps->useEdge && !ps->useNis && !ps->useFsr) {
+                // Hybrid defaults to edge when upscaler unset/blit.
+                ps->useEdge = true;
+            }
         }
         ps->fsrDirectToSwapchain = false;
+        ps->edgeDirectToSwapchain = false;
         ps->fsrDirectSwizzleBgra = false;
-        // Always init+resize when scaling so F3 can flip blit↔FSR without recreate.
+        // Always init+resize when scaling so F3 can flip blit↔FSR↔NIS↔edge without recreate.
         if (scaling) {
             DeviceContext* fsrCtx = ps->offloadIgpu ? &dd->igpu : &dd->dgpu;
             fsrCtx->loadDispatch();
             ps->fsr.init(fsrCtx);
-            if (xfsr_ctrl::enabled()) ps->fsr.enableRcas = xfsr_ctrl::peek().rcas;
+            if (xfsr_ctrl::enabled()) {
+                const auto peek = xfsr_ctrl::peek();
+                ps->fsr.enableRcas = peek.rcas;
+            }
             ps->fsr.resize(ps->renderW, ps->renderH, ps->displayW, ps->displayH);
-            // Round-trip FSR writes an iGPU image; cannot STORAGE into the dGPU swapchain.
-            // Direct STORAGE→WSI DEVICE_LOSTs on NVIDIA GTX 1650 after the first present
-            // even when STORAGE usage was granted (BGRA_UNORM). Prefer FSR→blit.
-            (void)presentHasStorage;
-            const bool fmtOkDirect = false && presentHasStorage && !ps->zinkOffloadRoundtrip &&
-                                     ps->useFsr && ps->fsr.canDirectToSwapchain(ps->format);
-            if (fmtOkDirect) {
+            try {
+                ps->nis.init(fsrCtx);
+                ps->nis.resize(ps->renderW, ps->renderH, ps->displayW, ps->displayH);
+            } catch (const std::exception& e) {
+                std::fprintf(stderr, "[xfsr] NIS init failed: %s — FSR1/blit/edge only\n", e.what());
+                ps->nis.destroy();
+                if (ps->useNis) {
+                    ps->useNis = false;
+                    ps->useEdge = true;
+                }
+            }
+            try {
+                ps->edge.init(fsrCtx);
+                if (xfsr_ctrl::enabled()) {
+                    const auto peek = xfsr_ctrl::peek();
+                    ps->edge.setSharpness(peek.edgeSharpness);
+                    ps->edge.setPerfMode(peek.edgePerf);
+                }
+                ps->edge.resize(ps->renderW, ps->renderH, ps->displayW, ps->displayH);
+            } catch (const std::exception& e) {
+                std::fprintf(stderr, "[xfsr] Edge init failed: %s — FSR1/NIS/blit only\n", e.what());
+                ps->edge.destroy();
+                if (ps->useEdge) {
+                    ps->useEdge = false;
+                    ps->useNis = ps->nis.ctx != nullptr;
+                    if (!ps->useNis) ps->useFsr = true;
+                }
+            }
+            // Round-trip cannot STORAGE into the other GPU's swapchain.
+            // Direct STORAGE→WSI DEVICE_LOSTs on NVIDIA after first present — keep FSR
+            // direct off. Edge hybrid presents on AMD iGPU where STORAGE→WSI is safe.
+            const bool presentNotNvidia = presentCtx->props.vendorID != 0x10de;
+            const bool wantEdgeDirect = presentHasStorage && !ps->zinkOffloadRoundtrip &&
+                                        ps->useEdge && presentNotNvidia &&
+                                        ps->edge.canDirectToSwapchain(ps->format);
+            const bool wantFsrDirect = false && presentHasStorage && !ps->zinkOffloadRoundtrip &&
+                                       ps->useFsr && ps->fsr.canDirectToSwapchain(ps->format);
+            if (wantEdgeDirect || wantFsrDirect) {
                 ps->realViews.resize(ps->realImages.size());
+                bool viewsOk = true;
                 for (size_t i = 0; i < ps->realImages.size(); ++i) {
                     VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
                     vci.image = ps->realImages[i];
@@ -1035,25 +1144,33 @@ bool setupOffloadPipeline(ProxySwapchain* ps, VkSwapchainKHR oldPresentSwapchain
                     vci.subresourceRange.levelCount = 1;
                     vci.subresourceRange.layerCount = 1;
                     if (presentCtx->vk.CreateImageView(presentCtx->device, &vci, nullptr,
-                                                       &ps->realViews[i]) == VK_SUCCESS) {
-                        ps->fsrDirectToSwapchain = true;
-                    } else {
-                        ps->fsrDirectToSwapchain = false;
+                                                       &ps->realViews[i]) != VK_SUCCESS) {
+                        viewsOk = false;
                         break;
                     }
                 }
-                if (!ps->fsrDirectToSwapchain) {
+                if (!viewsOk) {
                     for (VkImageView v : ps->realViews) {
                         if (v && presentCtx->vk.DestroyImageView)
                             presentCtx->vk.DestroyImageView(presentCtx->device, v, nullptr);
                     }
                     ps->realViews.clear();
                 } else {
-                    ps->fsrDirectSwizzleBgra = FsrPass::formatNeedsBgraSwizzle(ps->format);
-                    logv("[xfsr] FSR → swapchain direct (no fullscreen copy), fmt=%u swizzleBGRA=%d "
-                         "rcas=%d\n",
-                         static_cast<unsigned>(ps->format), ps->fsrDirectSwizzleBgra ? 1 : 0,
-                         ps->fsr.enableRcas ? 1 : 0);
+                    ps->edgeDirectToSwapchain = wantEdgeDirect;
+                    ps->fsrDirectToSwapchain = wantFsrDirect;
+                    ps->fsrDirectSwizzleBgra = EdgePass::formatNeedsBgraSwizzle(ps->format);
+                    if (wantEdgeDirect) {
+                        logv("[xfsr] edge → swapchain direct (no fullscreen copy), fmt=%u "
+                             "swizzleBGRA=%d mode=%s\n",
+                             static_cast<unsigned>(ps->format), ps->fsrDirectSwizzleBgra ? 1 : 0,
+                             ps->edge.perfMode ? "perf" : "quality");
+                    }
+                    if (wantFsrDirect) {
+                        logv("[xfsr] FSR → swapchain direct (no fullscreen copy), fmt=%u "
+                             "swizzleBGRA=%d rcas=%d\n",
+                             static_cast<unsigned>(ps->format), ps->fsrDirectSwizzleBgra ? 1 : 0,
+                             ps->fsr.enableRcas ? 1 : 0);
+                    }
                 }
             }
         }
@@ -1137,10 +1254,15 @@ bool reconfigureOffloadPresentPath(ProxySwapchain* ps) {
     waitOffloadIdle(dd);
 
     const bool wantOffload = xfsr_ctrl::enabled() ? xfsr_ctrl::peek().offload : offloadEnabled();
-    const bool wantFsr = xfsr_ctrl::enabled() ? xfsr_ctrl::peek().fsr : layerFsrPassEnabled();
+    const xfsr_ctrl::Upscaler wantUps = resolveUpscaler();
+    const bool wantFsr = wantUps == xfsr_ctrl::Upscaler::Fsr1;
+    const bool wantNis = wantUps == xfsr_ctrl::Upscaler::Nis;
+    const bool wantEdge = wantUps == xfsr_ctrl::Upscaler::Edge;
     const bool wantRcas = xfsr_ctrl::enabled() ? xfsr_ctrl::peek().rcas : true;
 
     ps->fsr.destroy();
+    ps->nis.destroy();
+    ps->edge.destroy();
     if (dd->xferReady) {
         dd->xfer.destroy();
         dd->xferReady = false;
@@ -1151,12 +1273,14 @@ bool reconfigureOffloadPresentPath(ProxySwapchain* ps) {
     }
 
     try {
+        DeviceContext* upCtx = &dd->dgpu;
         if (wantOffload) {
             if (!tryInitCompanionIgpu(dd, ps->surface)) {
                 std::fprintf(stderr, "[xfsr] live offload: iGPU unavailable — staying same-GPU\n");
                 ps->offloadIgpu = false;
                 ps->zinkOffloadRoundtrip = false;
                 ps->fsr.init(&dd->dgpu);
+                upCtx = &dd->dgpu;
             } else {
                 // Always round-trip for live toggle (dGPU keeps window WSI).
                 ps->offloadIgpu = true;
@@ -1171,23 +1295,56 @@ bool reconfigureOffloadPresentPath(ProxySwapchain* ps) {
                 dd->xferBackReady = true;
                 dd->xferBack.resize(ps->displayW, ps->displayH, VK_FORMAT_R8G8B8A8_UNORM, 4);
                 ps->fsr.init(&dd->igpu);
+                upCtx = &dd->igpu;
             }
         } else {
             ps->offloadIgpu = false;
             ps->zinkOffloadRoundtrip = false;
             dd->dgpu.loadDispatch();
             ps->fsr.init(&dd->dgpu);
+            upCtx = &dd->dgpu;
         }
         ps->useFsr = wantFsr;
+        ps->useNis = wantNis;
+        ps->useEdge = wantEdge;
         ps->fsr.enableRcas = wantRcas;
-        // Always allocate FSR outputs — F3 can flip blit↔FSR without another reconfigure.
+        // Always allocate FSR/NIS/edge outputs — F3 can flip without reconfigure.
         ps->fsr.resize(ps->renderW, ps->renderH, ps->displayW, ps->displayH);
+        try {
+            ps->nis.init(upCtx);
+            ps->nis.resize(ps->renderW, ps->renderH, ps->displayW, ps->displayH);
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "[xfsr] NIS init failed: %s\n", e.what());
+            ps->nis.destroy();
+            if (ps->useNis) {
+                ps->useNis = false;
+                ps->useEdge = true;
+            }
+        }
+        try {
+            ps->edge.init(upCtx);
+            if (xfsr_ctrl::enabled()) {
+                const auto peek = xfsr_ctrl::peek();
+                ps->edge.setSharpness(peek.edgeSharpness);
+                ps->edge.setPerfMode(peek.edgePerf);
+            }
+            ps->edge.resize(ps->renderW, ps->renderH, ps->displayW, ps->displayH);
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "[xfsr] Edge init failed: %s\n", e.what());
+            ps->edge.destroy();
+            if (ps->useEdge) {
+                ps->useEdge = false;
+                ps->useFsr = true;
+            }
+        }
         // Companion create can clobber global volk — refresh present-device dispatch.
         dd->dgpu.loadDispatch();
         if (ps->offloadIgpu) dd->igpu.loadDispatch();
         // Present ring + real WSI stay on dGPU for both modes.
-        std::fprintf(stderr, "[xfsr] reconfigured live: offload=%s (round-trip) FSR=%s xfer=%s\n",
-                     ps->offloadIgpu ? "on" : "off", ps->useFsr ? "on" : "off",
+        std::fprintf(stderr,
+                     "[xfsr] reconfigured live: offload=%s (round-trip) upscaler=%s xfer=%s\n",
+                     ps->offloadIgpu ? "on" : "off",
+                     ps->useEdge ? "edge" : (ps->useNis ? "nis" : (ps->useFsr ? "fsr1" : "blit")),
                      ps->offloadIgpu ? FrameTransfer::backendName(dd->xfer.backend) : "n/a");
         return true;
     } catch (const std::exception& e) {
@@ -1196,10 +1353,28 @@ bool reconfigureOffloadPresentPath(ProxySwapchain* ps) {
         ps->offloadIgpu = false;
         ps->zinkOffloadRoundtrip = false;
         try {
+            ps->fsr.destroy();
+            ps->nis.destroy();
+            ps->edge.destroy();
             ps->fsr.init(&dd->dgpu);
             ps->useFsr = wantFsr;
+            ps->useNis = wantNis;
+            ps->useEdge = wantEdge;
             ps->fsr.enableRcas = wantRcas;
             ps->fsr.resize(ps->renderW, ps->renderH, ps->displayW, ps->displayH);
+            if (wantNis) {
+                ps->nis.init(&dd->dgpu);
+                ps->nis.resize(ps->renderW, ps->renderH, ps->displayW, ps->displayH);
+            }
+            if (wantEdge) {
+                ps->edge.init(&dd->dgpu);
+                if (xfsr_ctrl::enabled()) {
+                    const auto peek = xfsr_ctrl::peek();
+                    ps->edge.setSharpness(peek.edgeSharpness);
+                    ps->edge.setPerfMode(peek.edgePerf);
+                }
+                ps->edge.resize(ps->renderW, ps->renderH, ps->displayW, ps->displayH);
+            }
         } catch (...) {
         }
         return false;
@@ -2148,6 +2323,8 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSwapchainKHR(VkDevice device,
         }
         logv("[xfsr] identity present (render==display %ux%u) — bypass proxy%s\n", ps->renderW,
              ps->renderH, kickShrink ? " (shrink kick)" : "");
+        xfsr_ctrl::publishPresentStatus(kickShrink ? "identity-kick" : "identity", ps->renderW,
+                                        ps->renderH, ps->displayW, ps->displayH, 0);
         delete ps;
         VkResult pr = createSwapchainPassthrough(dd, pCreateInfo, pAllocator, pSwapchain);
         if (pr == VK_SUCCESS && kickShrink && pSwapchain && *pSwapchain) {
@@ -2225,7 +2402,20 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSwapchainKHR(VkDevice device,
                  "[xfsr] proxy ready: handle=%p render=%ux%u display=%ux%u imgs=%zu %s%s%s\n",
                  reinterpret_cast<void*>(ps->handle), ps->renderW, ps->renderH, ps->displayW,
                  ps->displayH, ps->appImages.size(), ps->offloadIgpu ? "dual-GPU" : "same-GPU",
-                 ps->useFsr ? "+FSR1" : "", ps->opaqueAppHandle ? " (opaque app handle)" : "");
+                 ps->useEdge ? "+edge"
+                             : (ps->useNis ? "+NIS" : (ps->useFsr ? "+FSR1" : "")),
+                 ps->opaqueAppHandle ? " (opaque app handle)" : "");
+    {
+        const char* mode = "proxy-blit";
+        if (ps->useEdge)
+            mode = (ps->offloadIgpu && !ps->zinkOffloadRoundtrip) ? "hybrid-edge" : "proxy-edge";
+        else if (ps->useNis)
+            mode = "proxy-nis";
+        else if (ps->useFsr)
+            mode = "proxy";
+        xfsr_ctrl::publishPresentStatus(mode, ps->renderW, ps->renderH, ps->displayW, ps->displayH,
+                                        0);
+    }
     return VK_SUCCESS;
 }
 
@@ -2315,14 +2505,34 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_AcquireNextImageKHR(VkDevice device, VkSwapc
         // Fake acquire: pick next app image, but WAIT until the last present/FSR that
         // read it has finished — otherwise the app redraws into an image still sampled
         // by our present cmd (NVIDIA DEVICE_LOST; xfsr_load_vk "wait failed (-4)").
+        // Finite timeout: ResetFences + early OUT_OF_DATE left fences unsignaled and
+        // UINT64_MAX froze Proton titles after first present (Village on NVIDIA).
         const uint32_t nImg = static_cast<uint32_t>(ps->appImages.size());
         if (nImg == 0) return VK_ERROR_OUT_OF_DATE_KHR;
         ps->acquireIndex = (ps->acquireIndex + 1) % nImg;
         *pImageIndex = ps->acquireIndex;
         if (dd && *pImageIndex < ps->appImgFence.size() && ps->appImgFence[*pImageIndex] &&
             dd->WaitForFences) {
+            constexpr uint64_t kAcqFenceTimeoutNs = 1000000000ull; // 1s
+            VkFence imgFence = ps->appImgFence[*pImageIndex];
             VkResult wr =
-                dd->WaitForFences(dd->device, 1, &ps->appImgFence[*pImageIndex], VK_TRUE, UINT64_MAX);
+                dd->WaitForFences(dd->device, 1, &imgFence, VK_TRUE, kAcqFenceTimeoutNs);
+            if (wr == VK_TIMEOUT) {
+                static bool loggedFenceTo = false;
+                if (!loggedFenceTo) {
+                    loggedFenceTo = true;
+                    std::fprintf(stderr,
+                                 "[xfsr] appImgFence wait timed out — signaling + OUT_OF_DATE "
+                                 "(avoids hard freeze after first present)\n");
+                }
+                // Unstick: empty submit so the next wait can proceed after recreate.
+                if (dd->ResetFences && dd->QueueSubmit) {
+                    dd->ResetFences(dd->device, 1, &imgFence);
+                    VkSubmitInfo mark{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+                    dd->QueueSubmit(dd->graphicsQueue, 1, &mark, imgFence);
+                }
+                return VK_ERROR_OUT_OF_DATE_KHR;
+            }
             if (wr != VK_SUCCESS) return wr;
         }
         // Signal sync objects — vkcube waits on the acquire semaphore before drawing.
@@ -2599,14 +2809,18 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
     VkSemaphore doneSem = ps->renderFinished[slot];
     DeviceContext& presentCtx = presentsOnIgpu(ps) ? dd->igpu : dd->dgpu;
 
-    // Live-safe: RCAS + FSR↔blit when the FSR pass already exists. Preset scale
-    // (F1) uses recreateSwapchain above; F5 one-way still needs restart.
-    if (xfsr_ctrl::enabled() && ps->fsr.ctx) {
+    // Live-safe: RCAS + edge sharp/mode + FSR↔blit↔NIS↔edge when passes exist.
+    // Preset/adaptive scale (F1) uses recreateSwapchain above; F5 one-way needs restart.
+    if (xfsr_ctrl::enabled() && (ps->fsr.ctx || ps->nis.ctx || ps->edge.ctx)) {
         ps->fsr.enableRcas = ctrl.rcas;
+        if (ps->edge.ctx) {
+            ps->edge.setSharpness(ctrl.edgeSharpness);
+            ps->edge.setPerfMode(ctrl.edgePerf);
+        }
         const bool scaling = ps->renderW != ps->displayW || ps->renderH != ps->displayH;
         if (scaling) {
-            // Enabling FSR after blit-only / reconfigure-with-FSR-off may lack outputs.
-            if (ctrl.fsr && (ps->fsr.displayW == 0 || !ps->fsr.easuOut[0].image)) {
+            if (ctrl.upscaler == xfsr_ctrl::Upscaler::Fsr1 &&
+                (ps->fsr.displayW == 0 || !ps->fsr.easuOut[0].image)) {
                 try {
                     waitPresentRing(ps, presentCtx);
                     waitOffloadIdle(dd);
@@ -2615,7 +2829,42 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
                     std::fprintf(stderr, "[xfsr] live FSR enable failed: %s\n", e.what());
                 }
             }
-            ps->useFsr = ctrl.fsr && ps->fsr.displayW != 0 && ps->fsr.easuOut[0].image;
+            if (ctrl.upscaler == xfsr_ctrl::Upscaler::Nis &&
+                (ps->nis.displayW == 0 || !ps->nis.out[0].image)) {
+                try {
+                    waitPresentRing(ps, presentCtx);
+                    waitOffloadIdle(dd);
+                    if (!ps->nis.ctx) {
+                        DeviceContext* c = ps->offloadIgpu ? &dd->igpu : &dd->dgpu;
+                        ps->nis.init(c);
+                    }
+                    ps->nis.resize(ps->renderW, ps->renderH, ps->displayW, ps->displayH);
+                } catch (const std::exception& e) {
+                    std::fprintf(stderr, "[xfsr] live NIS enable failed: %s\n", e.what());
+                }
+            }
+            if (ctrl.upscaler == xfsr_ctrl::Upscaler::Edge &&
+                (ps->edge.displayW == 0 || !ps->edge.out[0].image)) {
+                try {
+                    waitPresentRing(ps, presentCtx);
+                    waitOffloadIdle(dd);
+                    if (!ps->edge.ctx) {
+                        DeviceContext* c = ps->offloadIgpu ? &dd->igpu : &dd->dgpu;
+                        ps->edge.init(c);
+                    }
+                    ps->edge.setSharpness(ctrl.edgeSharpness);
+                    ps->edge.setPerfMode(ctrl.edgePerf);
+                    ps->edge.resize(ps->renderW, ps->renderH, ps->displayW, ps->displayH);
+                } catch (const std::exception& e) {
+                    std::fprintf(stderr, "[xfsr] live Edge enable failed: %s\n", e.what());
+                }
+            }
+            ps->useFsr = ctrl.upscaler == xfsr_ctrl::Upscaler::Fsr1 && ps->fsr.displayW != 0 &&
+                         ps->fsr.easuOut[0].image;
+            ps->useNis = ctrl.upscaler == xfsr_ctrl::Upscaler::Nis && ps->nis.displayW != 0 &&
+                         ps->nis.out[0].image;
+            ps->useEdge = ctrl.upscaler == xfsr_ctrl::Upscaler::Edge && ps->edge.displayW != 0 &&
+                          ps->edge.out[0].image;
         }
     }
 
@@ -2658,6 +2907,57 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
                 (void)memcpyMs;
                 (void)totalMs;
             }
+            roundtripUpscaled = true;
+            (void)queue;
+        } else if (ps->zinkOffloadRoundtrip && dd->xferReady && dd->xferBackReady && ps->useNis &&
+                   ps->nis.ctx) {
+            // NIS has no fused OffloadRoundTrip yet — blocking iGPU chain (same as FSR
+            // legacy). Never record iGPU NIS into the dGPU present cmd (SIGSEGV).
+            std::vector<VkPipelineStageFlags> stages;
+            if (pPresentInfo->waitSemaphoreCount > 0) {
+                stages.assign(pPresentInfo->waitSemaphoreCount, VK_PIPELINE_STAGE_TRANSFER_BIT);
+            }
+            const VkSemaphore* waitSems =
+                pPresentInfo->waitSemaphoreCount > 0 ? pPresentInfo->pWaitSemaphores : nullptr;
+            double memcpyMs = 0, totalMs = 0;
+            const GpuImage& onIgpu = dd->xfer.transferPipeline(
+                ps->appImages[idx], memcpyMs, totalMs, pPresentInfo->waitSemaphoreCount, waitSems,
+                stages.empty() ? nullptr : stages.data(), VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+
+            dd->igpu.resetAndBegin();
+            ps->nis.record(dd->igpu.cmd, onIgpu);
+            dd->igpu.endSubmitWait();
+
+            frameImg = &dd->xferBack.transferPipeline(
+                ps->nis.output(), memcpyMs, totalMs, 0, nullptr, nullptr,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            (void)memcpyMs;
+            (void)totalMs;
+            roundtripUpscaled = true;
+            (void)queue;
+        } else if (ps->zinkOffloadRoundtrip && dd->xferReady && dd->xferBackReady && ps->useEdge &&
+                   ps->edge.ctx) {
+            // Edge + round-trip (non-hybrid only): blocking chain. Hybrid refuses this path.
+            std::vector<VkPipelineStageFlags> stages;
+            if (pPresentInfo->waitSemaphoreCount > 0) {
+                stages.assign(pPresentInfo->waitSemaphoreCount, VK_PIPELINE_STAGE_TRANSFER_BIT);
+            }
+            const VkSemaphore* waitSems =
+                pPresentInfo->waitSemaphoreCount > 0 ? pPresentInfo->pWaitSemaphores : nullptr;
+            double memcpyMs = 0, totalMs = 0;
+            const GpuImage& onIgpu = dd->xfer.transferPipeline(
+                ps->appImages[idx], memcpyMs, totalMs, pPresentInfo->waitSemaphoreCount, waitSems,
+                stages.empty() ? nullptr : stages.data(), VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+
+            dd->igpu.resetAndBegin();
+            ps->edge.record(dd->igpu.cmd, onIgpu);
+            dd->igpu.endSubmitWait();
+
+            frameImg = &dd->xferBack.transferPipeline(
+                ps->edge.output(), memcpyMs, totalMs, 0, nullptr, nullptr,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            (void)memcpyMs;
+            (void)totalMs;
             roundtripUpscaled = true;
             (void)queue;
         } else if (presentsOnIgpu(ps) && dd->xferReady) {
@@ -2735,11 +3035,21 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
         }
         if (acq != VK_SUCCESS && acq != VK_SUBOPTIMAL_KHR) {
             if (presentsOnIgpu(ps) && !dd->forceRoundTripOffload) {
-                dd->forceRoundTripOffload = true;
-                std::fprintf(stderr,
-                             "[xfsr] offload: acquire failed (%d) on one-way — fall back to "
-                             "round-trip\n",
-                             static_cast<int>(acq));
+                if (hybridWanted()) {
+                    std::fprintf(stderr,
+                                 "[xfsr] hybrid: acquire failed (%d) — next recreate drops "
+                                 "offload (same-GPU edge)\n",
+                                 static_cast<int>(acq));
+                    // Disable offload via env so setupOffloadPipeline stays same-GPU.
+                    setenv("XFSR_OFFLOAD", "0", 1);
+                    unsetenv("XFSR_HYBRID");
+                } else {
+                    dd->forceRoundTripOffload = true;
+                    std::fprintf(stderr,
+                                 "[xfsr] offload: acquire failed (%d) on one-way — fall back to "
+                                 "round-trip\n",
+                                 static_cast<int>(acq));
+                }
                 return VK_ERROR_OUT_OF_DATE_KHR;
             }
             return acq;
@@ -2750,9 +3060,11 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
         bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         vkCheck(pd.BeginCommandBuffer(cmd, &bi), "begin cmd");
 
-        const bool directFsr = ps->useFsr && ps->fsrDirectToSwapchain &&
-                               realIdx < ps->realViews.size() &&
-                               ps->realViews[realIdx] != VK_NULL_HANDLE;
+        const bool directViewsOk = realIdx < ps->realViews.size() &&
+                                   ps->realViews[realIdx] != VK_NULL_HANDLE;
+        const bool directFsr = ps->useFsr && ps->fsrDirectToSwapchain && directViewsOk;
+        const bool directEdge = ps->useEdge && ps->edgeDirectToSwapchain && directViewsOk &&
+                                ps->edge.ctx == &presentCtx;
         const bool swizzle = ps->fsrDirectSwizzleBgra;
 
         VkImage srcImage = frameImg->image;
@@ -2795,6 +3107,38 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
                     srcH = fsrOut.height;
                     srcFmt = fsrOut.format ? fsrOut.format : VK_FORMAT_R8G8B8A8_UNORM;
                 }
+            } else if (ps->useNis && ps->nis.ctx == &presentCtx) {
+                ps->nis.record(cmd, *frameImg);
+                const GpuImage& nisOut = ps->nis.output();
+                transitionImage(&presentCtx, cmd, nisOut.image,
+                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+                srcImage = nisOut.image;
+                srcW = nisOut.width;
+                srcH = nisOut.height;
+                srcFmt = nisOut.format ? nisOut.format : VK_FORMAT_R8G8B8A8_UNORM;
+            } else if (ps->useEdge && ps->edge.ctx == &presentCtx) {
+                // Hybrid one-way: edge on iGPU after low-res transfer (no back-haul).
+                if (directEdge) {
+                    ps->edge.record(cmd, *frameImg, ps->realViews[realIdx],
+                                    ps->realImages[realIdx], swizzle);
+                    wroteSwapchain = true;
+                } else {
+                    ps->edge.record(cmd, *frameImg);
+                    const GpuImage& edgeOut = ps->edge.output();
+                    transitionImage(&presentCtx, cmd, edgeOut.image,
+                                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                    VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_READ_BIT,
+                                    VK_ACCESS_TRANSFER_READ_BIT);
+                    srcImage = edgeOut.image;
+                    srcW = edgeOut.width;
+                    srcH = edgeOut.height;
+                    srcFmt = edgeOut.format ? edgeOut.format : VK_FORMAT_R8G8B8A8_UNORM;
+                }
             } else {
                 transitionImage(&presentCtx, cmd, frameImg->image,
                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
@@ -2827,6 +3171,49 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
                     srcW = fsrOut.width;
                     srcH = fsrOut.height;
                     srcFmt = fsrOut.format ? fsrOut.format : VK_FORMAT_R8G8B8A8_UNORM;
+                }
+            } else if (ps->useNis && ps->nis.ctx == &presentCtx) {
+                // Only when NIS lives on the present device (same-GPU). Offload NIS
+                // must take the round-trip branch above — cross-device record SIGSEGVs.
+                transitionImage(&presentCtx, cmd, frameImg->image, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_MEMORY_WRITE_BIT,
+                                VK_ACCESS_SHADER_READ_BIT);
+                ps->nis.record(cmd, *frameImg);
+                const GpuImage& nisOut = ps->nis.output();
+                transitionImage(&presentCtx, cmd, nisOut.image,
+                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+                srcImage = nisOut.image;
+                srcW = nisOut.width;
+                srcH = nisOut.height;
+                srcFmt = nisOut.format ? nisOut.format : VK_FORMAT_R8G8B8A8_UNORM;
+            } else if (ps->useEdge && ps->edge.ctx == &presentCtx) {
+                transitionImage(&presentCtx, cmd, frameImg->image, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_MEMORY_WRITE_BIT,
+                                VK_ACCESS_SHADER_READ_BIT);
+                if (directEdge) {
+                    ps->edge.record(cmd, *frameImg, ps->realViews[realIdx],
+                                    ps->realImages[realIdx], swizzle);
+                    wroteSwapchain = true;
+                } else {
+                    ps->edge.record(cmd, *frameImg);
+                    const GpuImage& edgeOut = ps->edge.output();
+                    transitionImage(&presentCtx, cmd, edgeOut.image,
+                                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                    VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_READ_BIT,
+                                    VK_ACCESS_TRANSFER_READ_BIT);
+                    srcImage = edgeOut.image;
+                    srcW = edgeOut.width;
+                    srcH = edgeOut.height;
+                    srcFmt = edgeOut.format ? edgeOut.format : VK_FORMAT_R8G8B8A8_UNORM;
                 }
             } else {
                 transitionImage(&presentCtx, cmd, frameImg->image, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
@@ -2951,10 +3338,18 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
         if (pr != VK_SUCCESS && pr != VK_SUBOPTIMAL_KHR && pr != VK_ERROR_OUT_OF_DATE_KHR) {
             std::fprintf(stderr, "[xfsr] QueuePresent failed: %d\n", static_cast<int>(pr));
             if (presentsOnIgpu(ps) && !dd->forceRoundTripOffload) {
-                dd->forceRoundTripOffload = true;
-                std::fprintf(stderr,
-                             "[xfsr] offload: fall back to round-trip on next swapchain recreate "
-                             "(XFSR_IGPU_PRESENT=0 to skip one-way)\n");
+                if (hybridWanted()) {
+                    std::fprintf(stderr,
+                                 "[xfsr] hybrid: present failed — next recreate drops offload "
+                                 "(same-GPU edge)\n");
+                    setenv("XFSR_OFFLOAD", "0", 1);
+                    unsetenv("XFSR_HYBRID");
+                } else {
+                    dd->forceRoundTripOffload = true;
+                    std::fprintf(stderr,
+                                 "[xfsr] offload: fall back to round-trip on next swapchain "
+                                 "recreate (XFSR_IGPU_PRESENT=0 to skip one-way)\n");
+                }
                 return VK_ERROR_OUT_OF_DATE_KHR;
             }
             return pr;
@@ -2969,15 +3364,27 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
             if (ps->zinkOffloadRoundtrip)
                 mode = ", dual-GPU FSR round-trip";
             else if (ps->offloadIgpu)
-                mode = ", dual-GPU one-way";
+                mode = ps->useEdge ? ", hybrid one-way edge" : ", dual-GPU one-way";
             std::fprintf(stderr, "[xfsr] first present ok (app img %u → display %ux%u%s)\n", idx,
                          ps->displayW, ps->displayH, mode);
+        }
+        if (ps->presentCount == 1 || ps->presentCount == 30 ||
+            (ps->presentCount > 0 && ps->presentCount % 120 == 0)) {
+            const char* st = "proxy-blit";
+            if (ps->useEdge)
+                st = (ps->offloadIgpu && !ps->zinkOffloadRoundtrip) ? "hybrid-edge" : "proxy-edge";
+            else if (ps->useNis)
+                st = "proxy-nis";
+            else if (ps->useFsr)
+                st = "proxy";
+            xfsr_ctrl::publishPresentStatus(st, ps->renderW, ps->renderH, ps->displayW,
+                                            ps->displayH, ps->presentCount);
         }
         if (verboseLog() &&
             (ps->presentCount == 60 || (ps->presentCount > 0 && ps->presentCount % 300 == 0))) {
             std::fprintf(stderr, "[xfsr] presented %u frames (%ux%u → %ux%u %s)\n", ps->presentCount,
                          ps->renderW, ps->renderH, ps->displayW, ps->displayH,
-                         ps->useFsr ? "FSR1" : "blit");
+                         ps->useEdge ? "edge" : (ps->useNis ? "NIS" : (ps->useFsr ? "FSR1" : "blit")));
         }
         if (pPresentInfo->pResults) {
             for (uint32_t i = 0; i < pPresentInfo->swapchainCount; ++i)
@@ -3007,15 +3414,22 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
     } catch (const std::exception& e) {
         std::fprintf(stderr, "[xfsr] present failed: %s\n", e.what());
         if (presentsOnIgpu(ps) && dd && !dd->forceRoundTripOffload) {
-            dd->forceRoundTripOffload = true;
             if (dd->xferReady) {
                 waitOffloadIdle(dd);
                 dd->xfer.destroy();
                 dd->xferReady = false;
             }
-            std::fprintf(stderr,
-                         "[xfsr] offload: fall back to round-trip on next swapchain recreate "
-                         "(XFSR_IGPU_PRESENT=0 to skip one-way)\n");
+            if (hybridWanted()) {
+                setenv("XFSR_OFFLOAD", "0", 1);
+                unsetenv("XFSR_HYBRID");
+                std::fprintf(stderr,
+                             "[xfsr] hybrid: present exception — next recreate same-GPU edge\n");
+            } else {
+                dd->forceRoundTripOffload = true;
+                std::fprintf(stderr,
+                             "[xfsr] offload: fall back to round-trip on next swapchain recreate "
+                             "(XFSR_IGPU_PRESENT=0 to skip one-way)\n");
+            }
             return VK_ERROR_OUT_OF_DATE_KHR;
         }
         return VK_ERROR_DEVICE_LOST;

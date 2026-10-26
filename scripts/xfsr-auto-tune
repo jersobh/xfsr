@@ -1,0 +1,278 @@
+#!/usr/bin/env bash
+# xfsr-auto-tune — quick preset/RCAS matrix → recommend (and optionally write) a profile.
+# ROADMAP #5. Uses the same XFSR_BENCH_END line as xfsr-bench.sh (xfsr_load_vk by default).
+#
+# Usage:
+#   ./scripts/xfsr-auto-tune --seconds 5 --apply
+#   SteamAppId=730 ./scripts/xfsr-auto-tune --apply   # section [app:730]
+#   ./scripts/xfsr-auto-tune --seconds 4 --dry-run
+#   ./scripts/xfsr-auto-tune --section exe:mygame --apply
+#
+# Always same-GPU (no --offload). Recommended profile pins upscaler=blit for max FPS
+# on hybrid NVIDIA+AMD; override with CLI --upscaler nis|fsr1 if you want more quality.
+#
+# Scoring: prefer higher avg FPS; if another preset is within QUALITY_FLOOR% of the
+# fastest and has a lower scale (better image), prefer that. RCAS off preferred when
+# within RCAS_EPS% of the same preset with RCAS on.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+BUILD="${XFSR_BUILD:-$ROOT/build}"
+XFSR="$ROOT/scripts/xfsr-run"
+VK_BIN="$BUILD/xfsr_load_vk"
+
+SECONDS_N=5
+COMPLEXITY=128
+WIN_W="${XFSR_BENCH_W:-1920}"
+WIN_H="${XFSR_BENCH_H:-1080}"
+APPLY=0
+DRY=0
+SECTION=""
+QUALITY_FLOOR="${XFSR_TUNE_QUALITY_FLOOR:-5}"   # % of best FPS
+RCAS_EPS="${XFSR_TUNE_RCAS_EPS:-3}"             # %; drop RCAS if within this
+NO_RCAS_ONLY=0
+
+usage() {
+  cat <<'EOF'
+Usage: xfsr-auto-tune [options]
+
+  --seconds N       Pass length (default: 5)
+  --complexity N    Bench load (default: 128)
+  --output WxH      Window / display extent (default: 1920x1080)
+  --section NAME    Profile header without brackets (e.g. app:730, exe:cs2)
+                    Default: SteamAppId → [app:ID], else [exe:xfsr_load_vk]
+  --apply           Append/replace the section in ~/.config/xfsr/profiles.conf
+  --dry-run         Print the recommended section only (no write)
+  --no-rcas-matrix  Only test RCAS off (faster)
+  -h, --help
+
+Always same-GPU; recommended profile sets upscaler=blit + offload=0.
+
+Env: XFSR_BUILD (layer/bin dir, default ./build), XFSR_BENCH_W/H,
+     XFSR_TUNE_QUALITY_FLOOR, XFSR_TUNE_RCAS_EPS
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --seconds) SECONDS_N="${2:?}"; shift 2 ;;
+    --seconds=*) SECONDS_N="${1#*=}"; shift ;;
+    --complexity) COMPLEXITY="${2:?}"; shift 2 ;;
+    --complexity=*) COMPLEXITY="${1#*=}"; shift ;;
+    --output)
+      WIN_W="${2%%x*}"; WIN_H="${2##*x}"; shift 2 ;;
+    --output=*)
+      o="${1#*=}"; WIN_W="${o%%x*}"; WIN_H="${o##*x}"; shift ;;
+    --section) SECTION="${2:?}"; shift 2 ;;
+    --section=*) SECTION="${1#*=}"; shift ;;
+    --apply) APPLY=1; shift ;;
+    --dry-run) DRY=1; shift ;;
+    --no-rcas-matrix) NO_RCAS_ONLY=1; shift ;;
+    -*)
+      echo "xfsr-auto-tune: unknown option: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+    *) break ;;
+  esac
+done
+
+if [[ ! -x "$VK_BIN" ]]; then
+  echo "xfsr-auto-tune: building xfsr_load_vk..."
+  cmake -S "$ROOT" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release -DXFSR_BUILD_BENCH=ON
+  cmake --build "$BUILD" -j --target xfsr_load_vk VkLayer_XFSR
+fi
+
+if [[ -z "$SECTION" ]]; then
+  if [[ -n "${SteamAppId:-${SteamAppID:-}}" ]]; then
+    SECTION="app:${SteamAppId:-$SteamAppID}"
+  else
+    SECTION="exe:$(basename -- "$VK_BIN")"
+  fi
+fi
+
+PRESETS=(quality balanced performance ultra)
+RCAS_STATES=(1 0)
+[[ $NO_RCAS_ONLY -eq 1 ]] && RCAS_STATES=(0)
+
+# preset scale for quality preference (lower = sharper image)
+scale_of() {
+  case "$1" in
+    ultra) echo 25 ;;
+    performance) echo 20 ;;
+    balanced) echo 17 ;;
+    *) echo 15 ;;
+  esac
+}
+
+RESULTS=()  # name|preset|rcas|avg|best|p1|stdev|extent
+
+run_one() {
+  local preset="$1" rcas="$2"
+  local name="preset=$preset rcas=$rcas"
+  local rcas_flag=(--rcas)
+  [[ "$rcas" == "0" ]] && rcas_flag=(--no-rcas)
+  echo
+  echo "======== $name ========"
+  local out
+  out="$(
+    env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET \
+      "$XFSR" --layer-dir "$BUILD" --no-profile --no-zink --no-mangohud --no-offload \
+        --upscaler blit --output "${WIN_W}x${WIN_H}" --preset "$preset" "${rcas_flag[@]}" \
+        -- "$VK_BIN" --seconds "$SECONDS_N" --complexity "$COMPLEXITY" \
+          --width "$WIN_W" --height "$WIN_H" --windowed \
+      2>&1 | tee /dev/stderr | grep '^XFSR_BENCH_END' | tail -n1 || true
+  )"
+  if [[ -z "$out" ]]; then
+    echo "  (no XFSR_BENCH_END — failed?)"
+    RESULTS+=("$name|$preset|$rcas|FAIL|—|—|—|—")
+    return
+  fi
+  local avg best p1 stdev extent
+  avg="$(echo "$out" | sed -n 's/.*avg_fps=\([0-9.]*\).*/\1/p')"
+  best="$(echo "$out" | sed -n 's/.*best_fps=\([0-9.]*\).*/\1/p')"
+  p1="$(echo "$out" | sed -n 's/.*p1_fps=\([0-9.]*\).*/\1/p')"
+  stdev="$(echo "$out" | sed -n 's/.*ft_stdev_ms=\([0-9.]*\).*/\1/p')"
+  extent="$(echo "$out" | sed -n 's/.*extent=\([0-9x]*\).*/\1/p')"
+  [[ -z "$p1" ]] && p1="$avg"
+  [[ -z "$stdev" ]] && stdev=0
+  RESULTS+=("$name|$preset|$rcas|$avg|$best|$p1|$stdev|$extent")
+  echo "  → avg=${avg} p1=${p1} stdev=${stdev}ms extent=${extent}"
+}
+
+echo "xfsr-auto-tune: ${SECONDS_N}s  complexity=${COMPLEXITY}  ${WIN_W}x${WIN_H}"
+echo "  section=[$SECTION]  quality_floor=${QUALITY_FLOOR}%  rcas_eps=${RCAS_EPS}%"
+echo "  binary=$VK_BIN"
+
+for p in "${PRESETS[@]}"; do
+  for r in "${RCAS_STATES[@]}"; do
+    run_one "$p" "$r"
+  done
+done
+
+# Score uses 0.6*avg + 0.4*p1 (1% lows). Among near-ties prefer lower scale then rcas=0.
+best_score=0
+declare -a candidates=()
+
+score_of() {
+  awk -v a="$1" -v p="$2" 'BEGIN{printf "%.4f", 0.6*a + 0.4*p}'
+}
+
+for row in "${RESULTS[@]}"; do
+  IFS='|' read -r name preset rcas avg best p1 stdev extent <<<"$row"
+  [[ "$avg" == "FAIL" || -z "$avg" ]] && continue
+  sc="$(score_of "$avg" "$p1")"
+  if awk -v a="$sc" -v b="$best_score" 'BEGIN{exit !(a>b)}'; then
+    best_score="$sc"
+  fi
+done
+
+floor_min="$(awk -v b="$best_score" -v f="$QUALITY_FLOOR" 'BEGIN{printf "%.4f", b*(100-f)/100}')"
+
+for row in "${RESULTS[@]}"; do
+  IFS='|' read -r name preset rcas avg best p1 stdev extent <<<"$row"
+  [[ "$avg" == "FAIL" || -z "$avg" ]] && continue
+  sc="$(score_of "$avg" "$p1")"
+  if awk -v a="$sc" -v m="$floor_min" 'BEGIN{exit !(a+0 >= m+0)}'; then
+    candidates+=("$row")
+  fi
+done
+
+pick_row=""
+pick_score=999999
+for row in "${candidates[@]}"; do
+  IFS='|' read -r name preset rcas avg best p1 stdev extent <<<"$row"
+  sc="$(scale_of "$preset")"
+  # Prefer lower scale; then prefer rcas off; then higher composite score; penalize jitter.
+  # rank = scale*1000 + rcas*100 + stdev*2 - (0.6*avg+0.4*p1)
+  score="$(awk -v s="$sc" -v r="$rcas" -v a="$avg" -v p="$p1" -v d="$stdev" \
+    'BEGIN{printf "%.2f", s*1000 + r*100 + d*2 - (0.6*a + 0.4*p)}')"
+  if awk -v s="$score" -v p="$pick_score" 'BEGIN{exit !(s<p)}'; then
+    pick_score="$score"
+    pick_row="$row"
+  fi
+done
+
+if [[ -z "$pick_row" ]]; then
+  echo "xfsr-auto-tune: no successful runs — aborting" >&2
+  exit 1
+fi
+
+IFS='|' read -r best_name best_preset best_rcas best_avg_pick best_best best_p1 best_stdev best_extent <<<"$pick_row"
+
+echo
+echo "╔════════════════════════════════════════╦═════════╦═══════╦══════╦════════════╗"
+echo "║ case                                   ║ avg FPS ║ 1%low ║ rcas ║ extent     ║"
+echo "╠════════════════════════════════════════╬═════════╬═══════╬══════╬════════════╣"
+for row in "${RESULTS[@]}"; do
+  IFS='|' read -r name preset rcas avg best p1 stdev extent <<<"$row"
+  mark=" "
+  [[ "$name" == "$best_name" ]] && mark="*"
+  printf "║%s %-37s ║ %7s ║ %5s ║ %4s ║ %-10s ║\n" "$mark" "$name" "$avg" "$p1" "$rcas" "$extent"
+done
+echo "╚════════════════════════════════════════╩═════════╩═══════╩══════╩════════════╝"
+echo
+echo "Recommended: preset=$best_preset rcas=$best_rcas  (avg=${best_avg_pick} p1=${best_p1} within ${QUALITY_FLOOR}% of peak score ${best_score})"
+
+PROFILE_BLOCK=$(cat <<EOF
+[$SECTION]
+preset=$best_preset
+upscaler=blit
+rcas=$best_rcas
+offload=0
+overlay=1
+note=auto-tune ${SECONDS_N}s avg=${best_avg_pick} p1=${best_p1} extent=${best_extent} (same-GPU blit)
+EOF
+)
+
+echo
+echo "---- profile ----"
+echo "$PROFILE_BLOCK"
+echo "-----------------"
+
+write_profile() {
+  local cfg_dir="${XDG_CONFIG_HOME:-$HOME/.config}/xfsr"
+  local cfg="$cfg_dir/profiles.conf"
+  mkdir -p "$cfg_dir"
+  if [[ ! -f "$cfg" ]]; then
+    local ex
+    for ex in \
+      "${HOME}/.local/share/xfsr/profiles.example.conf" \
+      "${ROOT}/share/xfsr/profiles.example.conf"; do
+      if [[ -f "$ex" ]]; then
+        cp "$ex" "$cfg"
+        break
+      fi
+    done
+    [[ -f "$cfg" ]] || : > "$cfg"
+  fi
+  local tmp
+  tmp="$(mktemp)"
+  # Drop an existing section with the same header, then append.
+  awk -v sec="[$SECTION]" '
+    BEGIN { skip=0 }
+    /^\[/ {
+      if ($0 == sec) { skip=1; next }
+      skip=0
+    }
+    skip { next }
+    { print }
+  ' "$cfg" > "$tmp"
+  # Ensure trailing newline before append.
+  if [[ -s "$tmp" ]] && [[ "$(tail -c1 "$tmp" | wc -l)" -eq 0 ]]; then
+    echo >> "$tmp"
+  fi
+  echo >> "$tmp"
+  echo "$PROFILE_BLOCK" >> "$tmp"
+  mv "$tmp" "$cfg"
+  echo "xfsr-auto-tune: wrote [$SECTION] → $cfg"
+}
+
+if [[ $APPLY -eq 1 ]]; then
+  write_profile
+elif [[ $DRY -eq 1 ]]; then
+  echo "xfsr-auto-tune: dry-run (pass --apply to write)"
+else
+  echo "Tip: re-run with --apply to write [$SECTION] into ~/.config/xfsr/profiles.conf"
+fi

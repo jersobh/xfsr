@@ -4,18 +4,23 @@
 // Usage:
 //   ./build/xfsr_load_gl [--seconds N] [--complexity N] [--width W] [--height H]
 //                        [--fullscreen|--windowed]
-//   xfsr-run --preset performance ./build/xfsr_load_gl --seconds 8
+//   Default: run until Ctrl+C / Esc / window close. Pass --seconds N for timed benches.
+//   xfsr-run --preset performance ./build/xfsr_load_gl
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <csignal>
 #include <string>
+#include <vector>
 
 using GLenum = unsigned int;
 using GLuint = unsigned int;
@@ -38,6 +43,10 @@ using GLbitfield = unsigned int;
 #define GL_ARRAY_BUFFER 0x8892
 
 namespace {
+
+std::atomic<bool> g_quit{false};
+
+void onSignal(int) { g_quit.store(true, std::memory_order_relaxed); }
 
 template <typename T>
 T load(const char* name) {
@@ -242,7 +251,7 @@ void main() {
 } // namespace
 
 int main(int argc, char** argv) {
-    int seconds = 8;
+    int seconds = 0; // 0 = until quit (Ctrl+C / Esc / close)
     int complexity = 64;
     int winW = 1920, winH = 1080;
     bool fullscreen = false;
@@ -255,12 +264,19 @@ int main(int argc, char** argv) {
         else if (a == "--fullscreen" || a == "-f") fullscreen = true;
         else if (a == "--windowed") fullscreen = false;
         else if (a == "-h" || a == "--help") {
-            std::printf("Usage: xfsr_load_gl [--seconds N] [--complexity N] [--width W] [--height H]\n"
-                        "                    [--fullscreen|--windowed]\n");
+            std::printf(
+                "Usage: xfsr_load_gl [--seconds N] [--complexity N] [--width W] [--height H]\n"
+                "                    [--fullscreen|--windowed]\n"
+                "  Default: run until Ctrl+C, Esc, or window close.\n"
+                "  --seconds N  timed run (used by benches).\n");
             return 0;
         }
     }
     complexity = std::clamp(complexity, 1, 512);
+    if (seconds < 0) seconds = 0;
+
+    std::signal(SIGINT, onSignal);
+    std::signal(SIGTERM, onSignal);
 
     if (!glfwInit()) die("glfwInit");
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
@@ -306,18 +322,27 @@ int main(int argc, char** argv) {
 
     auto t0 = std::chrono::steady_clock::now();
     auto tReport = t0;
+    auto tPrev = t0;
     uint64_t frames = 0, framesWindow = 0;
     double bestFps = 0;
     float time = 0.0f;
+    std::vector<double> frameMs;
+    frameMs.reserve(static_cast<size_t>(std::max(seconds, 30)) * 240u + 64u);
 
-    std::printf("XFSR_BENCH_BEGIN api=opengl seconds=%d complexity=%d extent=%dx%d\n", seconds,
-                complexity, fbw, fbh);
+    if (seconds > 0) {
+        std::printf("XFSR_BENCH_BEGIN api=opengl seconds=%d complexity=%d extent=%dx%d\n", seconds,
+                    complexity, fbw, fbh);
+    } else {
+        std::printf("XFSR_BENCH_BEGIN api=opengl seconds=until_quit complexity=%d extent=%dx%d\n"
+                    "xfsr_load_gl: running until Ctrl+C / Esc / window close\n",
+                    complexity, fbw, fbh);
+    }
 
-    while (!glfwWindowShouldClose(window)) {
+    while (!glfwWindowShouldClose(window) && !g_quit.load(std::memory_order_relaxed)) {
         glfwPollEvents();
         if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS) break;
         auto now = std::chrono::steady_clock::now();
-        if (std::chrono::duration<double>(now - t0).count() >= seconds) break;
+        if (seconds > 0 && std::chrono::duration<double>(now - t0).count() >= seconds) break;
 
         glfwGetFramebufferSize(window, &fbw, &fbh);
         p_glViewport(0, 0, fbw, fbh);
@@ -335,6 +360,12 @@ int main(int argc, char** argv) {
         ++framesWindow;
         time += 0.016f;
 
+        {
+            const double ms = std::chrono::duration<double, std::milli>(now - tPrev).count();
+            if (frames > 1 && ms > 0.01 && ms < 250.0) frameMs.push_back(ms);
+            tPrev = now;
+        }
+
         double dt = std::chrono::duration<double>(now - tReport).count();
         if (dt >= 0.5) {
             double fps = framesWindow / dt;
@@ -348,10 +379,27 @@ int main(int argc, char** argv) {
 
     double totalSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     double avgFps = totalSec > 0 ? frames / totalSec : 0;
+    double p1Fps = 0, ftStdev = 0;
+    if (!frameMs.empty()) {
+        std::sort(frameMs.begin(), frameMs.end());
+        const size_t i99 = std::min(frameMs.size() - 1,
+                                    static_cast<size_t>(frameMs.size() * 0.99));
+        const double p99ms = frameMs[i99];
+        p1Fps = p99ms > 0 ? 1000.0 / p99ms : 0;
+        double mean = 0;
+        for (double m : frameMs) mean += m;
+        mean /= static_cast<double>(frameMs.size());
+        double var = 0;
+        for (double m : frameMs) {
+            const double d = m - mean;
+            var += d * d;
+        }
+        ftStdev = std::sqrt(var / static_cast<double>(frameMs.size()));
+    }
     std::printf("XFSR_BENCH_END api=opengl frames=%llu seconds=%.3f avg_fps=%.2f best_fps=%.2f "
-                "extent=%dx%d complexity=%d\n",
-                static_cast<unsigned long long>(frames), totalSec, avgFps, bestFps, fbw, fbh,
-                complexity);
+                "p1_fps=%.2f ft_stdev_ms=%.3f extent=%dx%d complexity=%d\n",
+                static_cast<unsigned long long>(frames), totalSec, avgFps, bestFps, p1Fps, ftStdev,
+                fbw, fbh, complexity);
 
     p_glDeleteVertexArrays(1, &vao);
     p_glDeleteProgram(prog);

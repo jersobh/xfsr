@@ -5,10 +5,77 @@ All notable changes to **xfsr** / **xfsr-run** are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- `xfsr-run --any` / `--universal` — gamescope nest that forces the game window to
+  the preset render size (upscales titles that keep the Vulkan layer on identity).
+  NVIDIA hybrids auto-use `--backend sdl` instead of disabling the nest
+- `--gamescope-backend` / `XFSR_GAMESCOPE_BACKEND`; profiles for CS2 / CoD4 / Village
+  default `gamescope=1`
+- Gamescope nest: `ENABLE_GAMESCOPE_WSI=1` on AMD/Deck (XWayland bypass). On
+  NVIDIA default **WSI off** (Valve#1182 black/white screen; DXVK uses nested
+  X11/xcb instead). Override with `XFSR_GAMESCOPE_WSI=0|1`. Never set
+  `PROTON_ENABLE_WAYLAND` on NVIDIA; Wayland nest via `XFSR_GAMESCOPE_WAYLAND=1`
+- Nest HUD: do not enable `--mangoapp` on NVIDIA (EGL/GLFW crash-loop); opt-in
+  via `XFSR_GAMESCOPE_MANGOAPP=1`
+- Nest present on Plasma Wayland: SDL host with `SDL_VIDEODRIVER=x11` (real
+  KWin Xwayland window). `xfsr-gamescope-focus` sets ChimeraOS-style
+  `GAMESCOPECTRL_BASELAYER_*` so the nest composites the game (desktop Steam
+  leaves `FOCUSED_APP_GFX` empty → black). `-e` only with
+  `XFSR_GAMESCOPE_STEAM=1`. No default `-f`
+- EdgePass quality pack: shared-mem source tile, edge-stopping cubic, anti-ring,
+  post-scale CAS, linear/sRGB, scale-aware sharpen; `XFSR_EDGE_MODE=perf` / `--edge-mode
+  perf` lite path; live `edge_sharp` / `--edge-sharpness`; F2 toggles edge quality↔perf
+  when on `edge`; STORAGE→swapchain direct on non-NVIDIA present (hybrid iGPU)
+- EdgePass v2: padded display-space CAS (no 16×16 tile seams), luma-only cubic +
+  chroma bilinear, Sobel/structure-tensor along-edge mix, linear anti-ring
+- `xfsr_load_vk` / `xfsr_load_gl` default to run until Ctrl+C / Esc (keep `--seconds` for benches)
+
+### Fixed
+
+- `--gamescope-fs` / profile `gamescope_fs=1` / `XFSR_GAMESCOPE_FS=1` — gamescope
+  host fullscreen (`-f`) while the game stays at nest `-w/-h` (CoD4 windowed fix)
+- Gamescope nest floor 640×480 (CoD4 / D3D9 reject ultra 768×432)
+- NVIDIA nest: skip gamescope by default (host stays black); use layer instead;
+  `XFSR_GAMESCOPE_FORCE=1` to allow nest anyway
+- Proxy acquire: finite `appImgFence` wait + re-signal on timeout (Village froze
+  after `first present ok` on UINT64_MAX). Village profile: blit + caps-shrink
+- `--gamescope`: no xfsr overlay (layer off) — MangoHud on the game; Zink without
+  xfsr shim; match load-app window to nest size; drop nested `--debug-hud` /
+  `--force-windows-fullscreen` (caused blink/swapchain thrash); warn that
+  `--hybrid`/`--offload` are ignored
+- Docs: prefer `xfsr-run --any` for titles that stay identity; NVIDIA nest uses
+  SDL backend instead of disabling gamescope
+
 ## [0.5.0] — 2026-10-25
 
 ### Added
 
+- `--gamescope` / profile `gamescope=1` — nest at preset render size, upscale with
+  gamescope `-F` (from `--upscaler` or `--gamescope-filter`). Unblocks CS2/Source 2
+  where the Vulkan layer stays identity. Layer off unless `XFSR_GAMESCOPE_LAYER=1`
+- `--upscaler edge` / `EdgePass` — heavier edge-aware spatial upscaler (F3: fsr1→blit→nis→edge)
+- `--hybrid` / `XFSR_HYBRID=1` — dGPU low-res → iGPU `edge` + **one-way present** (no
+  full-res back-haul). Status `mode=hybrid-edge`. If one-way WSI fails, same-GPU
+  `edge` fallback (refuses silent round-trip). Skips MangoHud; pins xfsr overlay
+- [ROADMAP.md](ROADMAP.md) — adaptive FSR, temporal/NIS, profiles, dma-buf, auto-tune
+- Per-game profiles: `~/.config/xfsr/profiles.conf` (from
+  `share/xfsr/profiles.example.conf`); match Steam AppID / exe / substring;
+  `--no-profile`, `--caps-shrink` / `--no-caps-shrink`
+- `scripts/xfsr-auto-tune` — short preset×RCAS matrix on `xfsr_load_vk`; prints a
+  profile section; `--apply` writes `~/.config/xfsr/profiles.conf`; scores
+  `avg` + `p1_fps` (1% lows) and frame-time stdev
+- Adaptive FSR: `--adaptive` / `XFSR_ADAPTIVE=1` + `--target-fps` — continuous float
+  scale (not only the preset ladder) with pixel hysteresis before recreate
+  (control: `adaptive`, `target_fps`, `scale`)
+- `--upscaler fsr1|blit|nis` / `XFSR_UPSCALER` — NIS-style edge-directional spatial
+  upscaler (`NisPass`)
+- `xfsr-run --check` — short `xfsr_load_vk` smoke; reads
+  `$XDG_RUNTIME_DIR/xfsr-status` (`mode=proxy|proxy-nis|proxy-edge|hybrid-edge|identity`)
+- Overlay pins by default when MangoHud is not requested
+- Bench lines include `p1_fps=` and `ft_stdev_ms=`
 - One-way offload skips MangoHud and pins the xfsr overlay with FPS, CPU%, GPU%
   and temperatures (sysfs). Native Vulkan may present on the iGPU; Zink stays on
   round-trip (NVIDIA calls present with the app swapchain — opaque handles SIGSEGV)
@@ -19,6 +86,12 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Zink on NVIDIA+AMD hybrids: put NVIDIA first in `VK_DRIVER_FILES` (keep Mesa
+  Gallium/Zink — do **not** set `__GLX_VENDOR_LIBRARY_NAME=nvidia`, which bypassed
+  Zink and killed the overlay); inject `--ozone-platform=x11` for Chrome when
+  Wayland is cleared; warn on browser + Wayland
+- NIS + live F4 offload: do not record iGPU `NisPass` into the dGPU present
+  command buffer (SIGSEGV); use a blocking transfer→NIS→transfer round-trip
 - CoD4 / D3D9: do not return proxy images smaller than CreateSwapchain extent
   (DEVICE_LOST after first present); identity + hint when the game ignores caps
 - Caps advertise `currentExtent=UINT_MAX` + `max=render` for DXVK; Zink uses a
@@ -33,6 +106,12 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Docs / profiles: hybrid max-FPS path is **same-GPU + blit/nis + ultra/adaptive**
+  (not `--offload`); FSR2/3/4 called out as out of layer scope (Proton FSR4 is
+  AMD-only). Steam / example launch lines and `profiles.example.conf` defaults
+  follow that guidance
+- `--fsr 0` / `--blit` starts with scale + linear blit (FSR1 pass off); `--native`
+  is passthrough (old `--fsr 0` behavior)
 - `--offload` without `--no-one-way` prefers one-way and does not load MangoHud
 - `xfsr-run --one-way` / offload docs: round-trip is `--no-one-way`; Zink offload
   is always round-trip on NVIDIA hybrids

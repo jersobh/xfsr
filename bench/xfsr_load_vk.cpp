@@ -5,7 +5,8 @@
 // Usage:
 //   ./build/xfsr_load_vk [--seconds N] [--complexity N] [--width W] [--height H]
 //                        [--fullscreen|--windowed]
-//   xfsr-run --no-zink --preset performance ./build/xfsr_load_vk --seconds 8
+//   Default: run until Ctrl+C / Esc / window close. Pass --seconds N for timed benches.
+//   xfsr-run --no-zink --preset performance ./build/xfsr_load_vk
 
 #ifndef VK_NO_PROTOTYPES
 #define VK_NO_PROTOTYPES
@@ -14,16 +15,23 @@
 #include <GLFW/glfw3.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <csignal>
 #include <string>
 #include <unistd.h>
 #include <vector>
 
 namespace {
+
+std::atomic<bool> g_quit{false};
+
+void onSignal(int) { g_quit.store(true, std::memory_order_relaxed); }
 
 void die(const char* msg) {
     std::fprintf(stderr, "xfsr_load_vk: %s\n", msg);
@@ -174,7 +182,7 @@ std::vector<uint32_t> compileGlsl(const char* stage, const char* src) {
 } // namespace
 
 int main(int argc, char** argv) {
-    int seconds = 8;
+    int seconds = 0; // 0 = until quit (Ctrl+C / Esc / close)
     int complexity = 64;
     int winW = 1920, winH = 1080;
     bool fullscreen = false;
@@ -187,12 +195,19 @@ int main(int argc, char** argv) {
         else if (a == "--fullscreen" || a == "-f") fullscreen = true;
         else if (a == "--windowed") fullscreen = false;
         else if (a == "-h" || a == "--help") {
-            std::printf("Usage: xfsr_load_vk [--seconds N] [--complexity N] [--width W] [--height H]\n"
-                        "                    [--fullscreen|--windowed]\n");
+            std::printf(
+                "Usage: xfsr_load_vk [--seconds N] [--complexity N] [--width W] [--height H]\n"
+                "                    [--fullscreen|--windowed]\n"
+                "  Default: run until Ctrl+C, Esc, or window close.\n"
+                "  --seconds N  timed run (used by --check / auto-tune).\n");
             return 0;
         }
     }
     complexity = std::clamp(complexity, 1, 512);
+    if (seconds < 0) seconds = 0;
+
+    std::signal(SIGINT, onSignal);
+    std::signal(SIGTERM, onSignal);
 
     if (!glfwInit()) die("glfwInit");
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
@@ -526,19 +541,28 @@ int main(int argc, char** argv) {
 
     auto t0 = std::chrono::steady_clock::now();
     auto tReport = t0;
+    auto tPrev = t0;
     uint64_t frames = 0;
     uint64_t framesWindow = 0;
     double bestFps = 0, lastFps = 0;
     float time = 0.0f;
+    std::vector<double> frameMs;
+    frameMs.reserve(static_cast<size_t>(std::max(seconds, 30)) * 240u + 64u);
 
-    std::printf("XFSR_BENCH_BEGIN api=vulkan seconds=%d complexity=%d extent=%ux%u\n", seconds,
-                complexity, extent.width, extent.height);
+    if (seconds > 0) {
+        std::printf("XFSR_BENCH_BEGIN api=vulkan seconds=%d complexity=%d extent=%ux%u\n", seconds,
+                    complexity, extent.width, extent.height);
+    } else {
+        std::printf("XFSR_BENCH_BEGIN api=vulkan seconds=until_quit complexity=%d extent=%ux%u\n"
+                    "xfsr_load_vk: running until Ctrl+C / Esc / window close\n",
+                    complexity, extent.width, extent.height);
+    }
 
-    while (!glfwWindowShouldClose(window)) {
+    while (!glfwWindowShouldClose(window) && !g_quit.load(std::memory_order_relaxed)) {
         glfwPollEvents();
         if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS) break;
         auto now = std::chrono::steady_clock::now();
-        if (std::chrono::duration<double>(now - t0).count() >= seconds) break;
+        if (seconds > 0 && std::chrono::duration<double>(now - t0).count() >= seconds) break;
 
         uint32_t slot = frameSlot;
         check(vkWaitForFences(device, 1, &fences[slot], VK_TRUE, UINT64_MAX), "wait");
@@ -616,6 +640,12 @@ int main(int argc, char** argv) {
         ++framesWindow;
         time += 0.016f;
 
+        {
+            const double ms = std::chrono::duration<double, std::milli>(now - tPrev).count();
+            if (frames > 1 && ms > 0.01 && ms < 250.0) frameMs.push_back(ms);
+            tPrev = now;
+        }
+
         double dt = std::chrono::duration<double>(now - tReport).count();
         if (dt >= 0.5) {
             lastFps = framesWindow / dt;
@@ -630,10 +660,28 @@ int main(int argc, char** argv) {
     vkDeviceWaitIdle(device);
     double totalSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     double avgFps = totalSec > 0 ? frames / totalSec : 0;
+    double p1Fps = 0, ftStdev = 0;
+    if (!frameMs.empty()) {
+        std::sort(frameMs.begin(), frameMs.end());
+        // 1% low ≈ reciprocal of the 99th-percentile frame time.
+        const size_t i99 = std::min(frameMs.size() - 1,
+                                    static_cast<size_t>(frameMs.size() * 0.99));
+        const double p99ms = frameMs[i99];
+        p1Fps = p99ms > 0 ? 1000.0 / p99ms : 0;
+        double mean = 0;
+        for (double m : frameMs) mean += m;
+        mean /= static_cast<double>(frameMs.size());
+        double var = 0;
+        for (double m : frameMs) {
+            const double d = m - mean;
+            var += d * d;
+        }
+        ftStdev = std::sqrt(var / static_cast<double>(frameMs.size()));
+    }
     std::printf("XFSR_BENCH_END api=vulkan frames=%llu seconds=%.3f avg_fps=%.2f best_fps=%.2f "
-                "extent=%ux%u complexity=%d\n",
-                static_cast<unsigned long long>(frames), totalSec, avgFps, bestFps, extent.width,
-                extent.height, complexity);
+                "p1_fps=%.2f ft_stdev_ms=%.3f extent=%ux%u complexity=%d\n",
+                static_cast<unsigned long long>(frames), totalSec, avgFps, bestFps, p1Fps, ftStdev,
+                extent.width, extent.height, complexity);
 
     // Minimal teardown — process exit is fine for a bench tool.
     glfwDestroyWindow(window);

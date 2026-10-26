@@ -24,4 +24,4 @@ export XFSR_VERBOSE="${XFSR_VERBOSE:-1}"
 echo "xfsr-demo: $BIN --preset $PRESET ${EXTRA[*]:-}"
 echo "  (Ctrl+C or Esc to quit; for timed table use ./scripts/xfsr-bench.sh)"
 exec "$XFSR" --mangohud --no-zink --preset "$PRESET" "${EXTRA[@]}" -- \
-  "$BIN" --seconds 3600 --complexity 64
+  "$BIN" --complexity 64

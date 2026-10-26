@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -154,7 +155,9 @@ struct Runtime {
     int presetIdx = 0;
     float scale = 1.5f;
     bool rcas = true;
-    bool fsr = true;
+    Upscaler upscaler = Upscaler::Fsr1;
+    float edgeSharpness = 0.45f;
+    bool edgePerf = false;
     bool offload = false;
     bool oneWay = true;
     bool oneWayForce = false;
@@ -162,12 +165,57 @@ struct Runtime {
     bool recreate = false;
     bool reconfigureOffload = false;
     bool retryOffload = false;
+    // ROADMAP #1 — dynamic resolution (continuous float scale).
+    bool adaptive = false;
+    float targetFps = 60.f;
+    float emaFtMs = 0.f; // present-to-present EMA
+    bool haveEma = false;
+    uint32_t lastDisplayW = 0;
+    uint32_t lastDisplayH = 0;
+    uint32_t lastRenderW = 0;
+    uint32_t lastRenderH = 0;
+    char presentMode[32] = "—"; // identity | proxy-edge | hybrid-edge | …
+    std::chrono::steady_clock::time_point lastPresent{};
+    std::chrono::steady_clock::time_point lastScaleChange{};
     std::chrono::steady_clock::time_point toastUntil{};
     char toast[160]{};
     char controlPath[512]{};
+    char statusPath[512]{};
     time_t controlMtime = 0;
     bool loggedKeys = false;
+    bool loggedAdaptive = false;
 };
+
+const char* upscalerName(Upscaler u) {
+    switch (u) {
+    case Upscaler::Blit:
+        return "blit";
+    case Upscaler::Nis:
+        return "nis";
+    case Upscaler::Edge:
+        return "edge";
+    default:
+        return "fsr1";
+    }
+}
+
+Upscaler parseUpscaler(const char* s) {
+    if (!s || !s[0]) return Upscaler::Fsr1;
+    if (std::strcmp(s, "blit") == 0 || std::strcmp(s, "0") == 0) return Upscaler::Blit;
+    if (std::strcmp(s, "nis") == 0 || std::strcmp(s, "2") == 0) return Upscaler::Nis;
+    if (std::strcmp(s, "edge") == 0 || std::strcmp(s, "3") == 0) return Upscaler::Edge;
+    if (std::strcmp(s, "fsr1") == 0 || std::strcmp(s, "fsr") == 0 || std::strcmp(s, "1") == 0)
+        return Upscaler::Fsr1;
+    return Upscaler::Fsr1;
+}
+
+uint32_t renderDim(uint32_t display, float scale) {
+    const float s = scale < 1.01f ? 1.f : scale;
+    uint32_t r = static_cast<uint32_t>(static_cast<float>(display) / s + 0.5f);
+    if (r < 64) r = 64;
+    if (r > display) r = display;
+    return r;
+}
 
 Runtime g_rt;
 
@@ -372,10 +420,31 @@ void formatStatusLocked(char* out, size_t n) {
     sampleMetricsLocked();
     char cpu[16] = "--";
     if (g_metrics.cpu >= 0) std::snprintf(cpu, sizeof(cpu), "%d%%", g_metrics.cpu);
-    std::snprintf(out, n, "xfsr %s %.2fx FSR:%s RCAS:%s off:%s 1way:%s\nFPS %.0f  CPU %s",
-                  kPresetNames[g_rt.presetIdx], g_rt.scale, g_rt.fsr ? "on" : "off",
-                  g_rt.rcas ? "on" : "off", g_rt.offload ? "on" : "off",
-                  g_rt.oneWay ? "on" : "off", g_metrics.fps, cpu);
+    if (g_rt.upscaler == Upscaler::Edge) {
+        if (g_rt.adaptive) {
+            std::snprintf(out, n,
+                          "xfsr A %.2fx tgt:%.0f edge %s sharp:%.2f\nFPS %.0f  CPU %s", g_rt.scale,
+                          g_rt.targetFps, g_rt.edgePerf ? "perf" : "hq", g_rt.edgeSharpness,
+                          g_metrics.fps, cpu);
+        } else {
+            std::snprintf(out, n,
+                          "xfsr %s %.2fx edge %s sharp:%.2f off:%s 1way:%s\nFPS %.0f  CPU %s",
+                          kPresetNames[g_rt.presetIdx], g_rt.scale,
+                          g_rt.edgePerf ? "perf" : "hq", g_rt.edgeSharpness,
+                          g_rt.offload ? "on" : "off", g_rt.oneWay ? "on" : "off", g_metrics.fps,
+                          cpu);
+        }
+    } else if (g_rt.adaptive) {
+        std::snprintf(out, n,
+                      "xfsr A %.2fx tgt:%.0f %s RCAS:%s\nFPS %.0f  CPU %s", g_rt.scale,
+                      g_rt.targetFps, upscalerName(g_rt.upscaler), g_rt.rcas ? "on" : "off",
+                      g_metrics.fps, cpu);
+    } else {
+        std::snprintf(out, n, "xfsr %s %.2fx %s RCAS:%s off:%s 1way:%s\nFPS %.0f  CPU %s",
+                      kPresetNames[g_rt.presetIdx], g_rt.scale, upscalerName(g_rt.upscaler),
+                      g_rt.rcas ? "on" : "off", g_rt.offload ? "on" : "off",
+                      g_rt.oneWay ? "on" : "off", g_metrics.fps, cpu);
+    }
     for (int i = 0; i < g_metrics.gpuN; ++i) appendGpu(out, n, i);
 }
 
@@ -427,18 +496,86 @@ void syncGlShimScaleEnvLocked() {
     unsetenv("XFSR_RENDER_H");
 }
 
-void applyPresetIdxLocked(int idx, bool requestRecreate) {
+// Continuous float scale. Recreate only when render pixels move ≥ hysteresis.
+void setScaleLocked(float newScale, bool requestRecreate, bool fromAdaptive) {
+    constexpr float kMin = 1.05f;
+    constexpr float kMax = 3.0f;
+    if (newScale < kMin) newScale = kMin;
+    if (newScale > kMax) newScale = kMax;
+    if (std::fabs(newScale - g_rt.scale) < 0.008f) return;
+
+    const uint32_t dw = g_rt.lastDisplayW ? g_rt.lastDisplayW : 1920u;
+    const uint32_t dh = g_rt.lastDisplayH ? g_rt.lastDisplayH : 1080u;
+    const uint32_t oldRw = g_rt.lastRenderW ? g_rt.lastRenderW : renderDim(dw, g_rt.scale);
+    const uint32_t oldRh = g_rt.lastRenderH ? g_rt.lastRenderH : renderDim(dh, g_rt.scale);
+    const uint32_t newRw = renderDim(dw, newScale);
+    const uint32_t newRh = renderDim(dh, newScale);
+    const int dpx = std::abs(static_cast<int>(newRw) - static_cast<int>(oldRw)) +
+                    std::abs(static_cast<int>(newRh) - static_cast<int>(oldRh));
+
+    g_rt.scale = newScale;
+    g_rt.presetIdx = presetIndexFromScale(newScale);
+    syncGlShimScaleEnvLocked();
+
+    // Need a meaningful pixel change before kicking OUT_OF_DATE (avoid thrash).
+    constexpr int kHysteresisPx = 12;
+    if (requestRecreate && dpx >= kHysteresisPx) {
+        g_rt.recreate = true;
+        g_rt.lastScaleChange = std::chrono::steady_clock::now();
+        char buf[160];
+        if (fromAdaptive)
+            std::snprintf(buf, sizeof(buf), "adaptive %.2fx (%ux%u)", g_rt.scale, newRw, newRh);
+        else
+            std::snprintf(buf, sizeof(buf), "scale %.2fx (%ux%u)", g_rt.scale, newRw, newRh);
+        armToastLocked(buf);
+    }
+}
+
+void applyPresetIdxLocked(int idx, bool requestRecreate, bool fromAdaptive = false) {
     if (idx < 0) idx = 0;
     if (idx >= kPresetCount) idx = kPresetCount - 1;
-    if (idx == g_rt.presetIdx) return;
+    setScaleLocked(kPresetScales[idx], requestRecreate, fromAdaptive);
     g_rt.presetIdx = idx;
-    g_rt.scale = kPresetScales[idx];
-    syncGlShimScaleEnvLocked();
-    // One-shot OUT_OF_DATE via layer — app/Zink recreates; CreateSwapchain picks up scale.
-    if (requestRecreate) g_rt.recreate = true;
-    char buf[160];
-    std::snprintf(buf, sizeof(buf), "preset %s (%.2fx)", kPresetNames[idx], g_rt.scale);
-    armToastLocked(buf);
+}
+
+// Present-to-present EMA → continuous scale toward XFSR_TARGET_FPS.
+void tickAdaptiveLocked() {
+    if (!g_rt.adaptive || g_rt.recreate) return;
+    const auto now = std::chrono::steady_clock::now();
+    if (g_rt.lastPresent.time_since_epoch().count() == 0) {
+        g_rt.lastPresent = now;
+        return;
+    }
+    const float dtMs =
+        std::chrono::duration<float, std::milli>(now - g_rt.lastPresent).count();
+    g_rt.lastPresent = now;
+    // Ignore stalls / hitch outliers that would yank the scale.
+    if (dtMs < 0.5f || dtMs > 100.f) return;
+
+    constexpr float kAlpha = 0.12f;
+    if (!g_rt.haveEma) {
+        g_rt.emaFtMs = dtMs;
+        g_rt.haveEma = true;
+    } else {
+        g_rt.emaFtMs = g_rt.emaFtMs * (1.f - kAlpha) + dtMs * kAlpha;
+    }
+
+    const float targetMs = 1000.f / (g_rt.targetFps > 1.f ? g_rt.targetFps : 60.f);
+    const float downThresh = targetMs * 0.88f; // headroom → sharper (lower scale)
+    const float upThresh = targetMs * 1.12f;   // miss target → lower res
+    const auto sinceChange =
+        std::chrono::duration<float>(now - g_rt.lastScaleChange).count();
+    const float cooldown = (g_rt.emaFtMs > upThresh) ? 0.35f : 0.90f;
+    if (sinceChange < cooldown) return;
+
+    const float err = (g_rt.emaFtMs - targetMs) / targetMs;
+    // Deadband — already near target.
+    if (std::fabs(err) < 0.06f) return;
+    // Asymmetric: drop resolution faster than we restore quality.
+    float step = err * 0.18f;
+    if (step > 0.12f) step = 0.12f;
+    if (step < -0.06f) step = -0.06f;
+    setScaleLocked(g_rt.scale + step, true, true);
 }
 
 bool ensureX11() {
@@ -582,13 +719,29 @@ void applyHotkeyActions(const KeyBits& cur, const KeyBits& prev, bool modOk) {
         applyPresetIdxLocked((g_rt.presetIdx + 1) % kPresetCount, true);
     }
     if (rise(cur.f2, prev.f2)) {
-        g_rt.rcas = !g_rt.rcas;
-        armToastLocked(g_rt.rcas ? "RCAS on" : "RCAS off (EASU only)");
+        if (g_rt.upscaler == Upscaler::Edge) {
+            g_rt.edgePerf = !g_rt.edgePerf;
+            setenv("XFSR_EDGE_MODE", g_rt.edgePerf ? "perf" : "quality", 1);
+            armToastLocked(g_rt.edgePerf ? "edge perf (lite)" : "edge quality");
+        } else {
+            g_rt.rcas = !g_rt.rcas;
+            armToastLocked(g_rt.rcas ? "RCAS on" : "RCAS off (EASU only)");
+        }
     }
     if (rise(cur.f3, prev.f3)) {
-        g_rt.fsr = !g_rt.fsr;
-        // Layer applies live when FSR pass exists; otherwise next natural recreate.
-        armToastLocked(g_rt.fsr ? "FSR on" : "FSR off (blit)");
+        // Cycle: fsr1 → blit → nis → edge → fsr1 (live when passes exist).
+        if (g_rt.upscaler == Upscaler::Fsr1)
+            g_rt.upscaler = Upscaler::Blit;
+        else if (g_rt.upscaler == Upscaler::Blit)
+            g_rt.upscaler = Upscaler::Nis;
+        else if (g_rt.upscaler == Upscaler::Nis)
+            g_rt.upscaler = Upscaler::Edge;
+        else
+            g_rt.upscaler = Upscaler::Fsr1;
+        setenv("XFSR_UPSCALER", upscalerName(g_rt.upscaler), 1);
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "upscaler %s", upscalerName(g_rt.upscaler));
+        armToastLocked(buf);
     }
     if (rise(cur.f4, prev.f4)) {
         setOffloadLocked(!g_rt.offload);
@@ -610,7 +763,7 @@ void pollHotkeysLocked() {
         g_rt.loggedKeys = true;
         std::fprintf(stderr,
                      "[xfsr] hotkeys: x11=%s evdev=%s mod=%s  "
-                     "(F1 preset F2 RCAS F3 FSR F4 offload F5 one-way F10 pin)%s\n",
+                     "(F1 preset F2 RCAS/edge-mode F3 FSR F4 offload F5 one-way F10 pin)%s\n",
                      g_x11.ready ? "yes" : "no", g_evdev.anyOpen ? "yes" : "no",
                      g_rt.requireMod ? "Shift+" : "none",
                      (!g_x11.ready && !g_evdev.anyOpen)
@@ -661,16 +814,92 @@ void handleControlLineLocked(char* line) {
         else
             g_rt.rcas = !g_rt.rcas;
         armToastLocked(g_rt.rcas ? "RCAS on" : "RCAS off");
+    } else if (std::strcmp(cmd, "edge_sharp") == 0 || std::strcmp(cmd, "edge_sharpness") == 0) {
+        float v = 0.f, frac = 0.f, place = 0.1f;
+        const char* p = arg;
+        while (*p == ' ' || *p == '\t') ++p;
+        while (*p >= '0' && *p <= '9') {
+            v = v * 10.f + static_cast<float>(*p - '0');
+            ++p;
+        }
+        if (*p == '.') {
+            ++p;
+            while (*p >= '0' && *p <= '9') {
+                frac += static_cast<float>(*p - '0') * place;
+                place *= 0.1f;
+                ++p;
+            }
+        }
+        v += frac;
+        if (v >= 0.f && v <= 1.f) {
+            g_rt.edgeSharpness = v;
+            char env[32];
+            std::snprintf(env, sizeof(env), "%.3f", v);
+            setenv("XFSR_EDGE_SHARPNESS", env, 1);
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "edge sharp %.2f", v);
+            armToastLocked(buf);
+        }
+    } else if (std::strcmp(cmd, "edge_mode") == 0) {
+        bool set = false;
+        if (!arg[0] || std::strcmp(arg, "toggle") == 0) {
+            g_rt.edgePerf = !g_rt.edgePerf;
+            set = true;
+        } else if (arg[0] == '1' || std::strcmp(arg, "perf") == 0 || std::strcmp(arg, "lite") == 0 ||
+                   std::strcmp(arg, "edge-lite") == 0) {
+            g_rt.edgePerf = true;
+            set = true;
+        } else if (arg[0] == '0' || std::strcmp(arg, "quality") == 0 || std::strcmp(arg, "hq") == 0) {
+            g_rt.edgePerf = false;
+            set = true;
+        }
+        if (set) {
+            setenv("XFSR_EDGE_MODE", g_rt.edgePerf ? "perf" : "quality", 1);
+            armToastLocked(g_rt.edgePerf ? "edge perf (lite)" : "edge quality");
+        }
     } else if (std::strcmp(cmd, "fsr") == 0) {
-        bool next = g_rt.fsr;
         if (arg[0] == '0')
-            next = false;
+            g_rt.upscaler = Upscaler::Blit;
         else if (arg[0] == '1')
-            next = true;
+            g_rt.upscaler = Upscaler::Fsr1;
         else
-            next = !g_rt.fsr;
-        g_rt.fsr = next;
-        armToastLocked(g_rt.fsr ? "FSR on" : "FSR off (blit)");
+            g_rt.upscaler =
+                (g_rt.upscaler == Upscaler::Fsr1) ? Upscaler::Blit : Upscaler::Fsr1;
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "upscaler %s", upscalerName(g_rt.upscaler));
+        armToastLocked(buf);
+    } else if (std::strcmp(cmd, "upscaler") == 0) {
+        if (arg[0])
+            g_rt.upscaler = parseUpscaler(arg);
+        else if (g_rt.upscaler == Upscaler::Fsr1)
+            g_rt.upscaler = Upscaler::Blit;
+        else if (g_rt.upscaler == Upscaler::Blit)
+            g_rt.upscaler = Upscaler::Nis;
+        else if (g_rt.upscaler == Upscaler::Nis)
+            g_rt.upscaler = Upscaler::Edge;
+        else
+            g_rt.upscaler = Upscaler::Fsr1;
+        setenv("XFSR_UPSCALER", upscalerName(g_rt.upscaler), 1);
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "upscaler %s", upscalerName(g_rt.upscaler));
+        armToastLocked(buf);
+    } else if (std::strcmp(cmd, "scale") == 0) {
+        float v = 0.f, frac = 0.f, place = 0.1f;
+        const char* p = arg;
+        while (*p >= '0' && *p <= '9') {
+            v = v * 10.f + static_cast<float>(*p - '0');
+            ++p;
+        }
+        if (*p == '.') {
+            ++p;
+            while (*p >= '0' && *p <= '9') {
+                frac += static_cast<float>(*p - '0') * place;
+                place *= 0.1f;
+                ++p;
+            }
+        }
+        v += frac;
+        if (v >= 1.05f && v <= 3.0f) setScaleLocked(v, true, false);
     } else if (std::strcmp(cmd, "overlay") == 0 || std::strcmp(cmd, "pin") == 0) {
         if (arg[0] == '0')
             g_rt.overlayPinned = false;
@@ -697,6 +926,33 @@ void handleControlLineLocked(char* line) {
         else
             next = !g_rt.oneWay;
         setOneWayLocked(next);
+    } else if (std::strcmp(cmd, "adaptive") == 0) {
+        if (arg[0] == '0')
+            g_rt.adaptive = false;
+        else if (arg[0] == '1')
+            g_rt.adaptive = true;
+        else
+            g_rt.adaptive = !g_rt.adaptive;
+        setenv("XFSR_ADAPTIVE", g_rt.adaptive ? "1" : "0", 1);
+        armToastLocked(g_rt.adaptive ? "adaptive on" : "adaptive off");
+    } else if (std::strcmp(cmd, "target_fps") == 0 || std::strcmp(cmd, "target") == 0) {
+        float v = 0.f;
+        const char* p = arg;
+        while (*p >= '0' && *p <= '9') {
+            v = v * 10.f + static_cast<float>(*p - '0');
+            ++p;
+        }
+        if (v >= 1.f) {
+            if (v < 20.f) v = 20.f;
+            if (v > 1000.f) v = 1000.f;
+            g_rt.targetFps = v;
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "%.0f", v);
+            setenv("XFSR_TARGET_FPS", buf, 1);
+            char toast[64];
+            std::snprintf(toast, sizeof(toast), "target %.0f FPS", v);
+            armToastLocked(toast);
+        }
     } else if (std::strcmp(cmd, "status") == 0) {
         armToastLocked(nullptr);
     }
@@ -849,6 +1105,31 @@ void transition(DeviceContext* ctx, VkCommandBuffer cmd, VkImage image, VkImageL
 
 void notePresented() {
     g_presentFrames.fetch_add(1, std::memory_order_relaxed);
+    // Adaptive may request recreate — don't block the present path long.
+    if (std::unique_lock<std::mutex> lock(g_rt.mu, std::try_to_lock); lock.owns_lock()) {
+        if (g_rt.adaptive) tickAdaptiveLocked();
+        else g_rt.lastPresent = std::chrono::steady_clock::now();
+    }
+}
+
+void publishPresentStatus(const char* mode, uint32_t renderW, uint32_t renderH,
+                          uint32_t displayW, uint32_t displayH, uint32_t presents) {
+    initFromEnv();
+    std::lock_guard<std::mutex> lock(g_rt.mu);
+    if (displayW) g_rt.lastDisplayW = displayW;
+    if (displayH) g_rt.lastDisplayH = displayH;
+    if (renderW) g_rt.lastRenderW = renderW;
+    if (renderH) g_rt.lastRenderH = renderH;
+    if (!g_rt.statusPath[0]) return;
+    FILE* f = std::fopen(g_rt.statusPath, "w");
+    if (!f) return;
+    std::fprintf(f,
+                 "mode=%s\nrender=%ux%u\ndisplay=%ux%u\npresents=%u\nscale=%.3f\npreset=%s\n"
+                 "upscaler=%s\nadaptive=%d\ntarget_fps=%.1f\nema_ft_ms=%.2f\n",
+                 mode && mode[0] ? mode : "unknown", renderW, renderH, displayW, displayH, presents,
+                 g_rt.scale, kPresetNames[g_rt.presetIdx], upscalerName(g_rt.upscaler),
+                 g_rt.adaptive ? 1 : 0, g_rt.targetFps, g_rt.haveEma ? g_rt.emaFtMs : 0.f);
+    std::fclose(f);
 }
 
 void initFromEnv() {
@@ -907,10 +1188,42 @@ void initFromEnv() {
     if (!rcas) rcas = std::getenv("CROSSVULKAN_RCAS");
     g_rt.rcas = !(rcas && rcas[0] == '0');
 
-    const char* fsr = std::getenv("XFSR_LAYER_FSR");
-    if (!fsr || !fsr[0]) fsr = std::getenv("XFSR_FSR");
-    if (!fsr || !fsr[0]) fsr = std::getenv("CROSSVULKAN_FSR");
-    g_rt.fsr = !(fsr && fsr[0] == '0');
+    if (const char* es = std::getenv("XFSR_EDGE_SHARPNESS")) {
+        float v = 0.f, frac = 0.f, place = 0.1f;
+        const char* p = es;
+        while (*p == ' ' || *p == '\t') ++p;
+        while (*p >= '0' && *p <= '9') {
+            v = v * 10.f + static_cast<float>(*p - '0');
+            ++p;
+        }
+        if (*p == '.') {
+            ++p;
+            while (*p >= '0' && *p <= '9') {
+                frac += static_cast<float>(*p - '0') * place;
+                place *= 0.1f;
+                ++p;
+            }
+        }
+        v += frac;
+        if (v >= 0.f && v <= 1.f) g_rt.edgeSharpness = v;
+    }
+    if (const char* em = std::getenv("XFSR_EDGE_MODE")) {
+        if (em[0] == '1' || std::strcmp(em, "perf") == 0 || std::strcmp(em, "lite") == 0 ||
+            std::strcmp(em, "edge-lite") == 0)
+            g_rt.edgePerf = true;
+        else if (em[0] == '0' || std::strcmp(em, "quality") == 0 || std::strcmp(em, "hq") == 0)
+            g_rt.edgePerf = false;
+    }
+
+    const char* ups = std::getenv("XFSR_UPSCALER");
+    if (ups && ups[0]) {
+        g_rt.upscaler = parseUpscaler(ups);
+    } else {
+        const char* fsr = std::getenv("XFSR_LAYER_FSR");
+        if (!fsr || !fsr[0]) fsr = std::getenv("XFSR_FSR");
+        if (!fsr || !fsr[0]) fsr = std::getenv("CROSSVULKAN_FSR");
+        g_rt.upscaler = (fsr && fsr[0] == '0') ? Upscaler::Blit : Upscaler::Fsr1;
+    }
 
     const char* off = std::getenv("XFSR_OFFLOAD");
     if (!off) off = std::getenv("CROSSVULKAN_OFFLOAD");
@@ -935,6 +1248,34 @@ void initFromEnv() {
         g_rt.oneWay = g_rt.offload;
     }
 
+    const char* adaptive = std::getenv("XFSR_ADAPTIVE");
+    if (!adaptive) adaptive = std::getenv("CROSSVULKAN_ADAPTIVE");
+    g_rt.adaptive = (adaptive && adaptive[0] && adaptive[0] != '0');
+
+    const char* tfps = std::getenv("XFSR_TARGET_FPS");
+    if (!tfps) tfps = std::getenv("CROSSVULKAN_TARGET_FPS");
+    if (tfps && tfps[0]) {
+        float v = 0.f;
+        const char* p = tfps;
+        while (*p == ' ' || *p == '\t') ++p;
+        while (*p >= '0' && *p <= '9') {
+            v = v * 10.f + static_cast<float>(*p - '0');
+            ++p;
+        }
+        if (*p == '.') {
+            ++p;
+            float place = 0.1f;
+            while (*p >= '0' && *p <= '9') {
+                v += static_cast<float>(*p - '0') * place;
+                place *= 0.1f;
+                ++p;
+            }
+        }
+        if (v < 20.f) v = 20.f;
+        if (v > 1000.f) v = 1000.f;
+        g_rt.targetFps = v;
+    }
+
     const char* cpath = std::getenv("XFSR_CONTROL");
     if (cpath && cpath[0]) {
         std::snprintf(g_rt.controlPath, sizeof(g_rt.controlPath), "%s", cpath);
@@ -946,15 +1287,30 @@ void initFromEnv() {
             std::snprintf(g_rt.controlPath, sizeof(g_rt.controlPath), "/tmp/xfsr-control-%d",
                           static_cast<int>(getpid()));
     }
+    {
+        const char* rt = std::getenv("XDG_RUNTIME_DIR");
+        if (rt && rt[0])
+            std::snprintf(g_rt.statusPath, sizeof(g_rt.statusPath), "%s/xfsr-status", rt);
+        else
+            std::snprintf(g_rt.statusPath, sizeof(g_rt.statusPath), "/tmp/xfsr-status-%d",
+                          static_cast<int>(getpid()));
+    }
+
+    g_rt.lastScaleChange = std::chrono::steady_clock::now();
 
     if (g_rt.hudOn) {
         std::fprintf(stderr,
-                     "[xfsr] controls on: F1 preset F2 RCAS F3 FSR F4 offload F5 one-way F10 pin%s%s\n"
-                     "[xfsr] control file: %s  (preset|rcas|fsr|offload|one-way|overlay|status)\n",
+                     "[xfsr] controls on: F1 preset F2 RCAS/edge-mode F3 FSR F4 offload F5 one-way F10 pin%s%s\n"
+                     "[xfsr] control file: %s  (preset|rcas|edge_sharp|edge_mode|fsr|offload|one-way|overlay|adaptive|status)\n",
                      g_rt.requireMod ? " (hold Shift)" : "",
                      g_rt.overlayPinned ? " [overlay pinned]" : "", g_rt.controlPath);
         // Touch the control file so the path always exists for scripting.
         std::ofstream touch(g_rt.controlPath, std::ios::app);
+    }
+    if (g_rt.adaptive && !g_rt.loggedAdaptive) {
+        g_rt.loggedAdaptive = true;
+        std::fprintf(stderr, "[xfsr] adaptive FSR on — target %.0f FPS (continuous scale)\n",
+                     g_rt.targetFps);
     }
 }
 
@@ -972,7 +1328,10 @@ Snapshot poll() {
         s.scale = g_rt.scale;
         s.preset = kPresetNames[g_rt.presetIdx];
         s.rcas = g_rt.rcas;
-        s.fsr = g_rt.fsr;
+        s.upscaler = g_rt.upscaler;
+        s.edgeSharpness = g_rt.edgeSharpness;
+        s.edgePerf = g_rt.edgePerf;
+        s.fsr = (g_rt.upscaler == Upscaler::Fsr1);
         s.offload = g_rt.offload;
         s.oneWay = g_rt.oneWay;
         s.oneWayForce = g_rt.oneWayForce;
@@ -985,7 +1344,10 @@ Snapshot poll() {
     s.scale = g_rt.scale;
     s.preset = kPresetNames[g_rt.presetIdx];
     s.rcas = g_rt.rcas;
-    s.fsr = g_rt.fsr;
+    s.upscaler = g_rt.upscaler;
+    s.edgeSharpness = g_rt.edgeSharpness;
+    s.edgePerf = g_rt.edgePerf;
+    s.fsr = (g_rt.upscaler == Upscaler::Fsr1);
     s.offload = g_rt.offload;
     s.oneWay = g_rt.oneWay;
     s.oneWayForce = g_rt.oneWayForce;
@@ -1011,7 +1373,10 @@ Snapshot peek() {
     s.scale = g_rt.scale;
     s.preset = kPresetNames[g_rt.presetIdx];
     s.rcas = g_rt.rcas;
-    s.fsr = g_rt.fsr;
+    s.upscaler = g_rt.upscaler;
+    s.edgeSharpness = g_rt.edgeSharpness;
+    s.edgePerf = g_rt.edgePerf;
+    s.fsr = (g_rt.upscaler == Upscaler::Fsr1);
     s.offload = g_rt.offload;
     s.oneWay = g_rt.oneWay;
     s.oneWayForce = g_rt.oneWayForce;

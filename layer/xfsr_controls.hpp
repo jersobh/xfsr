@@ -10,11 +10,16 @@
 
 namespace xfsr_ctrl {
 
+enum class Upscaler : uint8_t { Blit = 0, Fsr1 = 1, Nis = 2, Edge = 3 };
+
 struct Snapshot {
     float scale = 1.5f;
     const char* preset = "quality";
     bool rcas = true;
-    bool fsr = true;          // FSR1 EASU (vs blit upscale)
+    bool fsr = true;          // legacy: Upscaler::Fsr1 (F3 / XFSR_LAYER_FSR)
+    Upscaler upscaler = Upscaler::Fsr1;
+    float edgeSharpness = 0.45f; // 0..1 — EdgePass CAS strength
+    bool edgePerf = false;       // EdgePass cheap path (edge-lite)
     bool offload = false;     // dual-GPU
     bool oneWay = true;       // prefer iGPU present when offload
     bool oneWayForce = false; // XFSR_IGPU_PRESENT=force (NVIDIA)
@@ -29,7 +34,12 @@ struct Snapshot {
 };
 
 // Count a presented frame for the overlay FPS (proxy and identity).
+// Also drives XFSR_ADAPTIVE scale steps (present-to-present EMA).
 void notePresented();
+
+// Write $XDG_RUNTIME_DIR/xfsr-status for xfsr-run --check (mode=proxy|identity|…).
+void publishPresentStatus(const char* mode, uint32_t renderW, uint32_t renderH,
+                          uint32_t displayW, uint32_t displayH, uint32_t presents);
 
 // Call once from CreateInstance (or lazily). Safe to call repeatedly.
 void initFromEnv();

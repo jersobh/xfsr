@@ -131,12 +131,36 @@ add_custom_command(
   VERBATIM
 )
 list(APPEND SPIRV_OUTPUTS ${SHADER_BIN_DIR}/fsr_easu.comp.spv ${SHADER_BIN_DIR}/fsr_rcas.comp.spv)
+
+add_custom_command(
+  OUTPUT ${SHADER_BIN_DIR}/nis_pass.comp.spv
+  COMMAND ${GLSLC} -O -fshader-stage=compute
+          -o ${SHADER_BIN_DIR}/nis_pass.comp.spv
+          ${SHADER_SRC_DIR}/nis_pass.comp.glsl
+  DEPENDS ${SHADER_SRC_DIR}/nis_pass.comp.glsl
+  COMMENT "Compiling nis_pass.comp.spv"
+  VERBATIM
+)
+list(APPEND SPIRV_OUTPUTS ${SHADER_BIN_DIR}/nis_pass.comp.spv)
+
+add_custom_command(
+  OUTPUT ${SHADER_BIN_DIR}/edge_pass.comp.spv
+  COMMAND ${GLSLC} -O -fshader-stage=compute
+          -o ${SHADER_BIN_DIR}/edge_pass.comp.spv
+          ${SHADER_SRC_DIR}/edge_pass.comp.glsl
+  DEPENDS ${SHADER_SRC_DIR}/edge_pass.comp.glsl
+  COMMENT "Compiling edge_pass.comp.spv"
+  VERBATIM
+)
+list(APPEND SPIRV_OUTPUTS ${SHADER_BIN_DIR}/edge_pass.comp.spv)
 add_custom_target(shaders ALL DEPENDS ${SPIRV_OUTPUTS})
 
 set(XFSR_CORE_SOURCES
   src/dual_devices.cpp
   src/frame_transfer.cpp
   src/fsr_pass.cpp
+  src/nis_pass.cpp
+  src/edge_pass.cpp
   src/gpu_image.cpp
   src/offload_roundtrip.cpp
   src/present.cpp
