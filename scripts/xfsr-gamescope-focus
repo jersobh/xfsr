@@ -17,7 +17,9 @@ focus_loop() {
     if xprop -root GAMESCOPE_FOCUSED_APP_GFX 2>/dev/null | grep -q '= [1-9]'; then
       return 0
     fi
-    # FOCUSABLE_WINDOWS: xid, appid, pid  (repeat)
+    # FOCUSABLE_WINDOWS: xid, appid, pid (repeat). Without -e, appid is often the
+    # xid itself (not SteamAppId) — BASELAYER must match that value or GFX focus
+    # never sticks (black nest). Prefer the tuple's appid for baselayer.
     local raw
     raw="$(xprop -root GAMESCOPE_FOCUSABLE_WINDOWS 2>/dev/null || true)"
     raw="${raw#*=}"
@@ -28,17 +30,22 @@ focus_loop() {
       win="$1"
       app="$2"
       shift 3
-      [[ "$win" =~ ^0x ]] || win=$(printf '0x%x' "$win" 2>/dev/null || echo "$win")
-      if [[ "$APP_ID" != "0" && "$app" != "$APP_ID" ]]; then
+      local win_dec="$1"
+      [[ "$win" =~ ^0x ]] || win=$(printf '0x%x' "$win_dec" 2>/dev/null || echo "$win")
+      # Without -e, gamescope lists appid == window xid. Always try those.
+      # If appid is a real Steam id and doesn't match ours, skip.
+      if [[ "$APP_ID" != "0" && "$app" != "$APP_ID" && "$app" != "$win_dec" ]]; then
         continue
       fi
-      xprop -id "$win" -f STEAM_GAME 32c -set STEAM_GAME "${APP_ID:-$app}" 2>/dev/null || true
-      xprop -root -f GAMESCOPECTRL_BASELAYER_APPID 32c -set GAMESCOPECTRL_BASELAYER_APPID "${APP_ID:-$app}" 2>/dev/null || true
+      local steam_tag="$APP_ID"
+      [[ "$steam_tag" == "0" ]] && steam_tag="$app"
+      xprop -id "$win" -f STEAM_GAME 32c -set STEAM_GAME "$steam_tag" 2>/dev/null || true
+      # Baselayer must match FOCUSABLE_APPS (xid when not in Steam -e mode).
+      xprop -root -f GAMESCOPECTRL_BASELAYER_APPID 32c -set GAMESCOPECTRL_BASELAYER_APPID "$app" 2>/dev/null || true
       xprop -root -f GAMESCOPECTRL_BASELAYER_WINDOW 32c -set GAMESCOPECTRL_BASELAYER_WINDOW "$win" 2>/dev/null || true
-      # Give gamescope a tick to apply, then verify.
       sleep 0.15
       if xprop -root GAMESCOPE_FOCUSED_APP_GFX 2>/dev/null | grep -q '= [1-9]'; then
-        echo "xfsr-gamescope-focus: focused win=$win app=${APP_ID:-$app}" >&2
+        echo "xfsr-gamescope-focus: focused win=$win baselayer_app=$app steam=$steam_tag" >&2
         return 0
       fi
     done
