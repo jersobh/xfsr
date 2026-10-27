@@ -75,9 +75,10 @@ something a swapchain-only layer can invent.
 ### Shipped (spatial)
 
 - `NisPass` compute: edge-directional bicubic + contrast-adaptive sharpen
-- `EdgePass` compute: quality (luma edge-stop cubic + chroma bilinear, structure-tensor
-  edges, padded display CAS, linear anti-ring) and perf/lite; live sharpness + mode;
-  direct STORAGE→WSI on AMD present
+- `EdgePass` compute: quality (luma edge-stop cubic + chroma bilinear, Di Zenzo RGB
+  structure tensor + ETF anisotropy, padded display CAS, linear anti-ring) and
+  perf/lite; live sharpness + mode; direct STORAGE→WSI on AMD present
+- Negative mip LOD bias via `vkCreateSampler` (`XFSR_LOD_BIAS=auto` → `-log2(scale)`)
 - CLI/env: `--upscaler`, `XFSR_UPSCALER`, `--edge-mode`, `--edge-sharpness`, `--hybrid`
 - Live F3 cycle: fsr1 → blit → nis → edge; F2 = RCAS or edge quality/perf
 - README: same-GPU for peak FPS; `--hybrid` for iGPU one-way `edge` (no back-haul)

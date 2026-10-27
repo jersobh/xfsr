@@ -7,8 +7,17 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-10-26
+
 ### Added
 
+- Sampler mip LOD bias: `vkCreateSampler` injects scale-aware negative `mipLodBias`
+  (`-log2(scale)` by default) so low internal res still samples sharp mips.
+  `XFSR_LOD_BIAS=auto|off|<float>`, `XFSR_LOD_BIAS_OFFSET`, `--lod-bias`,
+  `--lod-bias-offset`. Skips compare/shadow and single-mip samplers
+- EdgePass Di Zenzo: RGB structure tensor (per-channel Sobel outer products) with
+  3×3 box-smoothed shared tile, ETF anisotropy-weighted along-edge mix, fused
+  single-pass CAS (quality + perf paths)
 - `xfsr-run --any` / `--universal` — gamescope nest that forces the game window to
   the preset render size (upscales titles that keep the Vulkan layer on identity).
   NVIDIA hybrids auto-use `--backend sdl` instead of disabling the nest
@@ -265,6 +274,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - Dual-GPU `SURFACE_LOST` / early `OUT_OF_DATE` (opaque app handle + iGPU-only window WSI)
 - Caps-shrink vs Zink EGL drawable mismatch
 
+[0.6.0]: https://github.com/jersobh/xfsr/releases/tag/v0.6.0
 [0.5.0]: https://github.com/jersobh/xfsr/releases/tag/v0.5.0
 [0.4.0]: https://github.com/jersobh/xfsr/releases/tag/v0.4.0
 [0.3.1]: https://github.com/jersobh/xfsr/releases/tag/v0.3.1

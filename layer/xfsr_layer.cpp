@@ -2,6 +2,7 @@
 // Enable: ENABLE_XFSR=1
 // Config: XFSR_FSR=1 XFSR_PRESET=quality|balanced|performance|ultra
 //         XFSR_OFFLOAD=1  XFSR_IGPU_PRESENT=0|1 (one-way try; 0=round-trip only)
+//         XFSR_LOD_BIAS=auto|off|<float>  XFSR_LOD_BIAS_OFFSET=<float>
 // Legacy CROSSVULKAN_* env names still accepted.
 //
 // Proxy swapchain: app gets low-res dGPU images; prefer iGPU present (one-way),
@@ -33,6 +34,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -258,6 +260,72 @@ bool capsShrinkEnabled() {
     return fsrEnabled();
 }
 
+// Manual float parse — avoid strtof (glibc 2.38 __isoc23_* breaks Proton steamrt).
+bool parseFloat(const char* s, float* out, const char** endOut = nullptr) {
+    if (!s || !out) return false;
+    const char* p = s;
+    while (*p == ' ' || *p == '\t') ++p;
+    bool neg = false;
+    if (*p == '-') {
+        neg = true;
+        ++p;
+    } else if (*p == '+') {
+        ++p;
+    }
+    if ((*p < '0' || *p > '9') && *p != '.') return false;
+    float v = 0.f, frac = 0.f, place = 0.1f;
+    const char* start = p;
+    while (*p >= '0' && *p <= '9') {
+        v = v * 10.f + static_cast<float>(*p - '0');
+        ++p;
+    }
+    if (*p == '.') {
+        ++p;
+        while (*p >= '0' && *p <= '9') {
+            frac += static_cast<float>(*p - '0') * place;
+            place *= 0.1f;
+            ++p;
+        }
+    }
+    if (p == start) return false;
+    v += frac;
+    if (neg) v = -v;
+    *out = v;
+    if (endOut) *endOut = p;
+    return true;
+}
+
+// Negative mip LOD bias so low internal res still samples sharper mips (PDF).
+// XFSR_LOD_BIAS=off|0 → disable; =auto (default when FSR/scaling) → -log2(scale);
+// numeric → absolute bias. XFSR_LOD_BIAS_OFFSET adds a user tweak.
+float samplerLodBiasInject() {
+    const char* e = xfsrEnv("XFSR_LOD_BIAS", "CROSSVULKAN_LOD_BIAS");
+    if (e) {
+        if (e[0] == '0' || std::strcmp(e, "off") == 0 || std::strcmp(e, "none") == 0)
+            return 0.f;
+        if (std::strcmp(e, "auto") != 0) {
+            float v = 0.f;
+            if (parseFloat(e, &v)) {
+                if (const char* off =
+                        xfsrEnv("XFSR_LOD_BIAS_OFFSET", "CROSSVULKAN_LOD_BIAS_OFFSET")) {
+                    float o = 0.f;
+                    if (parseFloat(off, &o)) v += o;
+                }
+                return std::clamp(v, -8.f, 8.f);
+            }
+        }
+    }
+    // auto / unset: only when FSR/scaling is on
+    if (!fsrEnabled()) return 0.f;
+    const float scale = presetScaleFromEnv();
+    float bias = (scale > 1.01f) ? -std::log2(scale) : 0.f;
+    if (const char* off = xfsrEnv("XFSR_LOD_BIAS_OFFSET", "CROSSVULKAN_LOD_BIAS_OFFSET")) {
+        float v = 0.f;
+        if (parseFloat(off, &v)) bias += v;
+    }
+    return std::clamp(bias, -8.f, 8.f);
+}
+
 // OpenGL via Zink: Mesa sizes the EGL drawable from the Vulkan swapchain extent.
 // Caps-shrink → Zink creates @ render res → drawable becomes a postage-stamp inside
 // the still-large GL window. Detect Zink and skip shrink; force-scale on CreateSwapchain.
@@ -334,6 +402,7 @@ struct DeviceData {
     PFN_vkDestroyFence DestroyFence = nullptr;
     PFN_vkWaitForFences WaitForFences = nullptr;
     PFN_vkResetFences ResetFences = nullptr;
+    PFN_vkCreateSampler CreateSampler = nullptr;
 
     bool isDiscrete = false;
     uint32_t graphicsFamily = 0;
@@ -1711,6 +1780,7 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateDevice(VkPhysicalDevice physicalDevice
     dd->DestroyFence = getDevProc<PFN_vkDestroyFence>(dd, "vkDestroyFence");
     dd->WaitForFences = getDevProc<PFN_vkWaitForFences>(dd, "vkWaitForFences");
     dd->ResetFences = getDevProc<PFN_vkResetFences>(dd, "vkResetFences");
+    dd->CreateSampler = getDevProc<PFN_vkCreateSampler>(dd, "vkCreateSampler");
 
     VkPhysicalDeviceProperties props = propsEarly;
     if (id && props.deviceType == 0)
@@ -1741,6 +1811,36 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateDevice(VkPhysicalDevice physicalDevice
     std::fprintf(stderr, "[xfsr] device %s (%s)\n", props.deviceName,
                  dd->isDiscrete ? "discrete" : "integrated/other");
     return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSampler(VkDevice device,
+                                                  const VkSamplerCreateInfo* pCreateInfo,
+                                                  const VkAllocationCallbacks* pAllocator,
+                                                  VkSampler* pSampler) {
+    DeviceData* dd = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_mu);
+        auto it = g_devices.find(keyOf(device));
+        if (it != g_devices.end()) dd = it->second;
+    }
+    if (!dd || !dd->CreateSampler) return VK_ERROR_INITIALIZATION_FAILED;
+    if (!pCreateInfo) return dd->CreateSampler(device, pCreateInfo, pAllocator, pSampler);
+
+    const float inject = samplerLodBiasInject();
+    // Skip: disabled, shadow/compare samplers, single-mip (no LOD selection).
+    if (inject == 0.f || pCreateInfo->compareEnable ||
+        pCreateInfo->maxLod <= pCreateInfo->minLod + 0.001f) {
+        return dd->CreateSampler(device, pCreateInfo, pAllocator, pSampler);
+    }
+
+    VkSamplerCreateInfo ci = *pCreateInfo;
+    ci.mipLodBias = std::clamp(ci.mipLodBias + inject, -16.f, 16.f);
+    static std::atomic<int> logged{0};
+    if (logged.fetch_add(1) == 0) {
+        std::fprintf(stderr, "[xfsr] CreateSampler mipLodBias inject %+.3f (scale-aware)\n",
+                     inject);
+    }
+    return dd->CreateSampler(device, &ci, pAllocator, pSampler);
 }
 
 VKAPI_ATTR void VKAPI_CALL xfsr_DestroyDevice(VkDevice device,
@@ -3459,6 +3559,8 @@ PFN_vkVoidFunction resolveDevice(const char* pName) {
         return reinterpret_cast<PFN_vkVoidFunction>(::xfsr_GetDeviceProcAddr);
     if (std::strcmp(pName, "vkDestroyDevice") == 0)
         return reinterpret_cast<PFN_vkVoidFunction>(xfsr_DestroyDevice);
+    if (std::strcmp(pName, "vkCreateSampler") == 0)
+        return reinterpret_cast<PFN_vkVoidFunction>(xfsr_CreateSampler);
     if (std::strcmp(pName, "vkCreateSwapchainKHR") == 0)
         return reinterpret_cast<PFN_vkVoidFunction>(xfsr_CreateSwapchainKHR);
     if (std::strcmp(pName, "vkDestroySwapchainKHR") == 0)

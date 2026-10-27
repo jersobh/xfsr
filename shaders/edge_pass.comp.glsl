@@ -1,9 +1,10 @@
 #version 450
 // xfsr "edge" — spatial upscaler (quality + perf).
-// Quality: shared-mem source tile, luma edge-stop cubic + chroma bilinear,
-//          structure-tensor along-edge mix, linear anti-ring,
-//          padded display-space CAS (no 16×16 tile seams).
-// Perf: bilinear + directional + light display-space sharpen.
+// Quality: shared-mem source tile, Di Zenzo RGB structure tensor (box-smoothed),
+//          anisotropy-weighted edge-stop cubic + chroma bilinear,
+//          ETF along-edge mix, fused display-space CAS (single pass),
+//          linear anti-ring, padded CAS (no 16×16 tile seams).
+// Perf: Di Zenzo per-pixel + directional + light display-space sharpen.
 // Workgroup 16×16 → one display pixel per lane.
 
 layout(local_size_x = 16, local_size_y = 16) in;
@@ -24,6 +25,7 @@ const int UP_DIM = 16 + 2 * UP_PAD; // 18
 const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
 
 shared vec3 smSrc[SRC_DIM * SRC_DIM];
+shared vec3 smTensor[SRC_DIM * SRC_DIM]; // xyz = (Jxx, Jxy, Jyy) Di Zenzo
 shared vec3 smUp[UP_DIM * UP_DIM];
 
 float lumaLin(vec3 c) {
@@ -70,6 +72,11 @@ vec3 srcAt(ivec2 local) {
     return smSrc[srcIdx(local.x, local.y)];
 }
 
+vec3 tensorAt(ivec2 local) {
+    local = clamp(local, ivec2(0), ivec2(SRC_DIM - 1));
+    return smTensor[srcIdx(local.x, local.y)];
+}
+
 // Bilinear from shared source tile (local float coords in source texel space).
 vec3 srcBilinear(vec2 local) {
     vec2 i = floor(local);
@@ -98,6 +105,62 @@ void fillSrcTile(ivec2 groupDispOrigin, vec2 renderSize, vec2 displaySize, out i
         smSrc[i] = sampleSrc(uv);
     }
     barrier();
+}
+
+// Di Zenzo RGB structure tensor at one shared-tile texel (Sobel per channel, sum outer products).
+vec3 diZenzoAt(ivec2 c) {
+    vec3 c00 = toLin(srcAt(c + ivec2(-1, -1)));
+    vec3 c10 = toLin(srcAt(c + ivec2(0, -1)));
+    vec3 c20 = toLin(srcAt(c + ivec2(1, -1)));
+    vec3 c01 = toLin(srcAt(c + ivec2(-1, 0)));
+    vec3 c21 = toLin(srcAt(c + ivec2(1, 0)));
+    vec3 c02 = toLin(srcAt(c + ivec2(-1, 1)));
+    vec3 c12 = toLin(srcAt(c + ivec2(0, 1)));
+    vec3 c22 = toLin(srcAt(c + ivec2(1, 1)));
+    vec3 gx = (c20 + 2.0 * c21 + c22) - (c00 + 2.0 * c01 + c02);
+    vec3 gy = (c02 + 2.0 * c12 + c22) - (c00 + 2.0 * c10 + c20);
+    return vec3(dot(gx, gx), dot(gx, gy), dot(gy, gy));
+}
+
+// 3×3 box-smooth of the structure tensor (smooth J, not squared blurred grads).
+void fillAndSmoothTensor() {
+    int lid = int(gl_LocalInvocationIndex);
+    int total = SRC_DIM * SRC_DIM;
+    for (int i = lid; i < total; i += 256) {
+        int sx = i % SRC_DIM;
+        int sy = i / SRC_DIM;
+        ivec2 c = ivec2(sx, sy);
+        vec3 acc = vec3(0.0);
+        for (int y = -1; y <= 1; ++y)
+            for (int x = -1; x <= 1; ++x)
+                acc += diZenzoAt(c + ivec2(x, y));
+        smTensor[i] = acc * (1.0 / 9.0);
+    }
+    barrier();
+}
+
+// Eigenanalysis of 2×2 structure tensor → edge tangent (ETF) + anisotropy.
+void tensorEigen(vec3 J, out vec2 alongDir, out float aniso, out float edgeStr) {
+    float Jxx = J.x;
+    float Jxy = J.y;
+    float Jyy = J.z;
+    float trace = Jxx + Jyy;
+    float det = Jxx * Jyy - Jxy * Jxy;
+    float disc = max(0.25 * trace * trace - det, 0.0);
+    float s = sqrt(disc);
+    float l1 = 0.5 * trace + s; // major (across edge)
+    float l2 = 0.5 * trace - s; // minor (along edge)
+    // Minor eigenvector: (Jxx-l2, Jxy) × rotate → along edge; use (-Jxy, Jxx-l1) form.
+    vec2 v = vec2(-Jxy, Jxx - l1);
+    float vlen = length(v);
+    if (vlen < 1e-8) {
+        v = vec2(-(Jyy - l1), Jxy);
+        vlen = length(v);
+    }
+    alongDir = (vlen > 1e-8) ? (v / vlen) : vec2(1.0, 0.0);
+    float den = max(l1 + l2, 1e-8);
+    aniso = clamp((l1 - l2) / den, 0.0, 1.0);
+    edgeStr = sqrt(max(l1, 0.0));
 }
 
 // Luma-only Mitchell with edge stop; anti-ring clamp in linear; chroma from bilinear soft.
@@ -132,7 +195,6 @@ vec3 edgeStopLumaChroma(vec2 srcPxLocal, float edgeSense) {
     vec3 soft = srcBilinear(srcPxLocal);
     vec3 linSoft = toLin(soft);
     float ySoft = max(dot(linSoft, LUMA), 1e-5);
-    // Replace luma, keep soft chroma ratios.
     vec3 linOut = linSoft * (ySharp / ySoft);
     return toSrgb(linOut);
 }
@@ -143,47 +205,46 @@ vec3 upsampleFromTile(vec2 uv, vec2 renderSize, ivec2 tileBase, float scale) {
     float edgeSense = mix(6.0, 14.0, clamp((scale - 1.0) / 1.5, 0.0, 1.0));
     vec3 soft = edgeStopLumaChroma(local, edgeSense);
 
-    // Structure tensor from 3×3 luma (better diagonals than axis-only).
-    float l00 = lumaLin(srcAt(ivec2(floor(local)) + ivec2(-1, -1)));
-    float l10 = lumaLin(srcAt(ivec2(floor(local)) + ivec2(0, -1)));
-    float l20 = lumaLin(srcAt(ivec2(floor(local)) + ivec2(1, -1)));
-    float l01 = lumaLin(srcAt(ivec2(floor(local)) + ivec2(-1, 0)));
-    float l21 = lumaLin(srcAt(ivec2(floor(local)) + ivec2(1, 0)));
-    float l02 = lumaLin(srcAt(ivec2(floor(local)) + ivec2(-1, 1)));
-    float l12 = lumaLin(srcAt(ivec2(floor(local)) + ivec2(0, 1)));
-    float l22 = lumaLin(srcAt(ivec2(floor(local)) + ivec2(1, 1)));
-    float gx = (l20 + 2.0 * l21 + l22) - (l00 + 2.0 * l01 + l02);
-    float gy = (l02 + 2.0 * l12 + l22) - (l00 + 2.0 * l10 + l20);
-    float g = sqrt(gx * gx + gy * gy);
-    float glen = max(g, 1e-5);
-    // Unit vector along the edge (perpendicular to gradient).
-    vec2 alongDir = vec2(-gy, gx) / glen;
-    vec3 a0 = srcBilinear(local + alongDir);
-    vec3 a1 = srcBilinear(local - alongDir);
+    vec3 J = tensorAt(ivec2(floor(local)));
+    vec2 alongDir;
+    float aniso, edgeStr;
+    tensorEigen(J, alongDir, aniso, edgeStr);
+
+    // Stretch kernel along ETF; compress across (elliptical deformation proxy).
+    float stretch = mix(1.0, 1.414, aniso);
+    vec3 a0 = srcBilinear(local + alongDir * stretch);
+    vec3 a1 = srcBilinear(local - alongDir * stretch);
     vec3 along = 0.5 * (a0 + a1);
-    float edgeAmt = clamp(g * mix(2.5, 5.0, clamp(scale / 2.5, 0.0, 1.0)), 0.0, 1.0);
-    return mix(soft, mix(soft, along, 0.40), edgeAmt);
+    float edgeAmt =
+        clamp(edgeStr * mix(2.0, 4.5, clamp(scale / 2.5, 0.0, 1.0)), 0.0, 1.0) * aniso;
+    return mix(soft, mix(soft, along, 0.45), edgeAmt);
 }
 
+// Perf path: Di Zenzo from texture taps (no shared tensor).
 vec3 upsampleLite(vec2 uv, vec2 renderSize, float scale) {
     vec2 texel = 1.0 / renderSize;
     vec3 soft = sampleSrc(uv);
-    float l00 = lumaLin(sampleSrc(uv + vec2(-texel.x, -texel.y)));
-    float l10 = lumaLin(sampleSrc(uv + vec2(0.0, -texel.y)));
-    float l20 = lumaLin(sampleSrc(uv + vec2(texel.x, -texel.y)));
-    float l01 = lumaLin(sampleSrc(uv + vec2(-texel.x, 0.0)));
-    float l21 = lumaLin(sampleSrc(uv + vec2(texel.x, 0.0)));
-    float l02 = lumaLin(sampleSrc(uv + vec2(-texel.x, texel.y)));
-    float l12 = lumaLin(sampleSrc(uv + vec2(0.0, texel.y)));
-    float l22 = lumaLin(sampleSrc(uv + vec2(texel.x, texel.y)));
-    float gx = (l20 + 2.0 * l21 + l22) - (l00 + 2.0 * l01 + l02);
-    float gy = (l02 + 2.0 * l12 + l22) - (l00 + 2.0 * l10 + l20);
-    float g = sqrt(gx * gx + gy * gy);
-    float glen = max(g, 1e-5);
-    vec2 alongDir = vec2(-gy, gx) / glen;
-    vec3 along = 0.5 * (sampleSrc(uv + alongDir * texel) + sampleSrc(uv - alongDir * texel));
-    float edgeAmt = clamp(g * mix(3.0, 6.0, clamp(scale / 2.5, 0.0, 1.0)), 0.0, 1.0);
-    return mix(soft, along, edgeAmt * 0.4);
+
+    vec3 c00 = toLin(sampleSrc(uv + vec2(-texel.x, -texel.y)));
+    vec3 c10 = toLin(sampleSrc(uv + vec2(0.0, -texel.y)));
+    vec3 c20 = toLin(sampleSrc(uv + vec2(texel.x, -texel.y)));
+    vec3 c01 = toLin(sampleSrc(uv + vec2(-texel.x, 0.0)));
+    vec3 c21 = toLin(sampleSrc(uv + vec2(texel.x, 0.0)));
+    vec3 c02 = toLin(sampleSrc(uv + vec2(-texel.x, texel.y)));
+    vec3 c12 = toLin(sampleSrc(uv + vec2(0.0, texel.y)));
+    vec3 c22 = toLin(sampleSrc(uv + vec2(texel.x, texel.y)));
+    vec3 gx = (c20 + 2.0 * c21 + c22) - (c00 + 2.0 * c01 + c02);
+    vec3 gy = (c02 + 2.0 * c12 + c22) - (c00 + 2.0 * c10 + c20);
+    vec3 J = vec3(dot(gx, gx), dot(gx, gy), dot(gy, gy));
+    vec2 alongDir;
+    float aniso, edgeStr;
+    tensorEigen(J, alongDir, aniso, edgeStr);
+
+    vec3 along =
+        0.5 * (sampleSrc(uv + alongDir * texel) + sampleSrc(uv - alongDir * texel));
+    float edgeAmt =
+        clamp(edgeStr * mix(2.5, 5.5, clamp(scale / 2.5, 0.0, 1.0)), 0.0, 1.0) * aniso;
+    return mix(soft, along, edgeAmt * 0.45);
 }
 
 vec3 upAt(ivec2 p) {
@@ -192,6 +253,7 @@ vec3 upAt(ivec2 p) {
 }
 
 // Display-space CAS using padded shared upscaled tile (real cross-tile neighbors).
+// Anisotropy from opts unused here — scale-aware strength only (fused single store).
 vec3 sharpenPadded(ivec2 upCoord, float sharp, float scale) {
     vec3 base = upAt(upCoord);
     if (sharp <= 0.001) return base;
@@ -215,11 +277,9 @@ vec3 sharpenPadded(ivec2 upCoord, float sharp, float scale) {
     return toSrgb(mix(c, filt * inv, amp * sharp));
 }
 
-// Perf: sharpen with source-neighbor taps scaled toward display (approximation).
 vec3 sharpenLite(vec3 c, vec2 uv, vec2 displaySize, float sharp, float scale) {
     if (sharp <= 0.001) return c;
     sharp *= mix(1.0, 0.7, clamp((scale - 1.2) / 1.3, 0.0, 1.0));
-    // Neighbor offset ≈ one display pixel in UV → sample upscaled-ish via source filter.
     vec2 t = 1.0 / displaySize;
     vec3 n = sampleSrc(uv + vec2(0.0, -t.y));
     vec3 s = sampleSrc(uv + vec2(0.0, t.y));
@@ -259,10 +319,9 @@ void main() {
     } else {
         ivec2 groupOrig = max(dst - lid, ivec2(0));
         ivec2 tileBase;
-        // Load source covering the WG plus UP_PAD display halo.
         fillSrcTile(groupOrig - ivec2(UP_PAD), renderSize, displaySize, tileBase);
+        fillAndSmoothTensor();
 
-        // Interior: always fill shared (clamp off-screen lanes so edge CAS isn't poisoned).
         {
             ivec2 dispClamped = clamp(dst, ivec2(0), ivec2(max(dw - 1, 0), max(dh - 1, 0)));
             vec2 uvI = (vec2(dispClamped) + 0.5) / displaySize;
@@ -271,7 +330,6 @@ void main() {
         }
         barrier();
 
-        // Halo: cooperative fill so edge CAS sees real neighbors (not clamped WG).
         int lane = int(gl_LocalInvocationIndex);
         int total = UP_DIM * UP_DIM;
         for (int i = lane; i < total; i += 256) {
@@ -281,7 +339,6 @@ void main() {
             if (interior) continue;
             ivec2 disp = groupOrig + ivec2(ux - UP_PAD, uy - UP_PAD);
             vec2 uvH = (vec2(disp) + 0.5) / displaySize;
-            // Clamp to image for out-of-bounds halo (edges of framebuffer).
             ivec2 dispClamped = clamp(disp, ivec2(0), ivec2(dw - 1, dh - 1));
             if (disp.x != dispClamped.x || disp.y != dispClamped.y)
                 uvH = (vec2(dispClamped) + 0.5) / displaySize;

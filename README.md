@@ -6,7 +6,7 @@
 
 FSR 1.0 for Linux games — wrap a title like `gamemoderun`, get more FPS by rendering lower and upscaling.
 
-**Current version:** [0.5.0](https://github.com/jersobh/xfsr/releases/tag/v0.5.0)
+**Current version:** [0.6.0](https://github.com/jersobh/xfsr/releases/tag/v0.6.0)
 
 **Roadmap:** [ROADMAP.md](ROADMAP.md) — adaptive FSR, profiles, auto-tune, dma-buf.  
 **Not in the layer:** true FSR 2/3/4 (need game motion vectors / AMD+Proton DLL upgrade — see ROADMAP §2).
@@ -136,8 +136,10 @@ xfsr-run --layer-dir ./build --check
 | `--fsr 1` | FSR1 upscale (default) |
 | `--fsr 0` / `--blit` | Same scale, linear blit instead of FSR1 (launch as F3 off) |
 | `--upscaler fsr1\|blit\|nis\|edge` | Spatial upscaler (`edge` = heavier; hybrid default) |
-| `--edge-mode quality\|perf` | EdgePass quality (luma cubic + padded CAS) or perf/lite |
+| `--edge-mode quality\|perf` | EdgePass quality (Di Zenzo + padded CAS) or perf/lite |
 | `--edge-sharpness 0..1` | EdgePass post-scale sharpen (default 0.45) |
+| `--lod-bias auto\|off\|<float>` | Negative mip LOD on app samplers (default `auto` = `-log2(scale)`) |
+| `--lod-bias-offset <float>` | Added to LOD bias (e.g. `-0.5`) |
 | `--hybrid` | Offload + one-way + `edge`; same-GPU fallback if one-way fails |
 | `--gamescope` | Nest game at preset render size; gamescope upscales to `--output` (CS2) |
 | `--gamescope-filter fsr\|nis\|linear\|…` | Override gamescope `-F` (default from `--upscaler`) |
@@ -247,12 +249,12 @@ Needs CMake ≥ 3.20, C++17, `glslc`, Vulkan loader. FSR1 headers: `third_party/
 
 ## Versioning
 
-- [`VERSION`](VERSION) — **0.5.0**
+- [`VERSION`](VERSION) — **0.6.0**
 - [`CHANGELOG.md`](CHANGELOG.md)
 - Tag `vX.Y.Z` → GitHub Actions builds the Linux package the install script downloads
 
 ```sh
-git tag v0.5.0 && git push origin v0.5.0
+git tag v0.6.0 && git push origin v0.6.0
 ```
 
 ## Credits

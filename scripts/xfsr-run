@@ -62,6 +62,11 @@ EDGE_MODE="${XFSR_EDGE_MODE:-quality}"
 EDGE_MODE_CLI=0
 EDGE_SHARP="${XFSR_EDGE_SHARPNESS:-}"
 EDGE_SHARP_CLI=0
+# Sampler mip LOD bias: auto = -log2(scale) when FSR on; off|0|float. Offset adds tweak.
+LOD_BIAS="${XFSR_LOD_BIAS:-auto}"
+LOD_BIAS_CLI=0
+LOD_BIAS_OFFSET="${XFSR_LOD_BIAS_OFFSET:-}"
+LOD_BIAS_OFFSET_CLI=0
 # In-game hotkeys + status overlay (default on). XFSR_HUD=0 / --no-controls to disable.
 HUD="${XFSR_HUD:-1}"
 # Pin status strip at launch (Proton often eats F10). XFSR_OVERLAY=1 / --overlay.
@@ -102,6 +107,10 @@ Options:
                                           nis = light edge scale; edge = heavier (hybrid default).
   --edge-mode quality|perf                EdgePass path (default quality; perf = edge-lite).
   --edge-sharpness 0..1                   EdgePass post-scale sharpen (default 0.45).
+  --lod-bias auto|off|<float>             Negative mip LOD bias on app samplers so low
+                                          internal res still fetches sharp mips (default auto
+                                          = -log2(scale) when FSR on). off/0 disables.
+  --lod-bias-offset <float>               Added to auto/absolute LOD bias (e.g. -0.5).
   --hybrid                                iGPU-native path: offload + one-way + upscaler=edge.
                                           dGPU renders low-res; iGPU upscales + presents.
                                           No full-res back-haul. Falls back to same-GPU edge
@@ -337,6 +346,12 @@ apply_profile_for_command() {
       edge_sharpness|edge-sharpness|edge_sharp|edge-sharp)
         if [[ $EDGE_SHARP_CLI -eq 0 ]]; then EDGE_SHARP="$val"; fi
         ;;
+      lod_bias|lod-bias)
+        if [[ $LOD_BIAS_CLI -eq 0 ]]; then LOD_BIAS="$val"; fi
+        ;;
+      lod_bias_offset|lod-bias-offset|lod_offset|lod-offset)
+        if [[ $LOD_BIAS_OFFSET_CLI -eq 0 ]]; then LOD_BIAS_OFFSET="$val"; fi
+        ;;
       offload)
         if [[ $OFFLOAD_CLI -eq 0 ]]; then OFFLOAD="$val"; fi
         ;;
@@ -506,6 +521,14 @@ while [[ $# -gt 0 ]]; do
       EDGE_SHARP="${2:?}"; EDGE_SHARP_CLI=1; shift 2 ;;
     --edge-sharpness=*|--edge-sharp=*)
       EDGE_SHARP="${1#*=}"; EDGE_SHARP_CLI=1; shift ;;
+    --lod-bias)
+      LOD_BIAS="${2:?}"; LOD_BIAS_CLI=1; shift 2 ;;
+    --lod-bias=*)
+      LOD_BIAS="${1#*=}"; LOD_BIAS_CLI=1; shift ;;
+    --lod-bias-offset|--lod-offset)
+      LOD_BIAS_OFFSET="${2:?}"; LOD_BIAS_OFFSET_CLI=1; shift 2 ;;
+    --lod-bias-offset=*|--lod-offset=*)
+      LOD_BIAS_OFFSET="${1#*=}"; LOD_BIAS_OFFSET_CLI=1; shift ;;
     --controls) HUD=1; shift ;;
     --no-controls) HUD=0; shift ;;
     --overlay) OVERLAY=1; OVERLAY_CLI=1; shift ;;
@@ -945,6 +968,10 @@ if [[ $SKIP_LAYER -eq 0 ]]; then
   export XFSR_EDGE_MODE="$EDGE_MODE"
   if [[ -n "$EDGE_SHARP" ]]; then
     export XFSR_EDGE_SHARPNESS="$EDGE_SHARP"
+  fi
+  export XFSR_LOD_BIAS="$LOD_BIAS"
+  if [[ -n "$LOD_BIAS_OFFSET" ]]; then
+    export XFSR_LOD_BIAS_OFFSET="$LOD_BIAS_OFFSET"
   fi
   export XFSR_HUD="$HUD"
   export XFSR_OVERLAY="$OVERLAY"
