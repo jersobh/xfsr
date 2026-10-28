@@ -36,19 +36,17 @@ xfsr-run --adaptive --target-fps 60 --upscaler nis --no-rcas --overlay %command%
 xfsr-run --zink --upscaler blit --preset ultra --no-rcas glmark2
 ```
 
-**Any title (CS2 / Village / DXVK that stay identity):** on **AMD/Deck**, nest in gamescope:
+**Any title (CS2 / Village / DXVK that stay identity):** nest in gamescope (forces the
+game window to the preset render size; gamescope upscales to your display):
 
 ```text
-xfsr-run --any --preset ultra --overlay %command%
+xfsr-run --any --preset quality --upscaler edge --gamescope-fs %command%
 ```
 
-On **NVIDIA proprietary** the nest often stays black (game can still render). `xfsr-run` skips gamescope there and uses the Vulkan layer — set a low **Borderless** res in-game (e.g. 1280×720) so the layer can upscale. `XFSR_GAMESCOPE_FORCE=1` retries the nest.
+On **NVIDIA** the host uses SDL+X11 and WSI off. If the nest stays black, set
+`XFSR_GAMESCOPE_FORCE=0` (layer-only) or a low Borderless res for titles that honor it.
 
-```text
-xfsr-run --preset quality --overlay %command%
-```
-
-**Vulkan layer** only upscales when the game creates a smaller swapchain (`proxy ready`). If you see `identity` at desktop size, lower in-game res (NVIDIA) or use `--any` (AMD).
+**Vulkan layer** only upscales when the game creates a smaller swapchain (`proxy ready`). If you see `identity` at desktop size, use `--any` (gamescope nest).
 
 Avoid for FPS: plain `--offload` round-trip, `XFSR_IGPU_PRESENT=force` with MangoHud, Chrome + Wayland as an FSR test.
 
@@ -81,10 +79,10 @@ Installs into `~/.local` (`xfsr-run`, Vulkan layer, shaders). Put `~/.local/bin`
 
 ## Steam
 
-**Any Steam / Proton / DXVK / Source 2 title** (recommended):
+**Any Steam / Proton / DXVK / Source 2 title** (recommended; needed for Village):
 
 ```text
-xfsr-run --any --preset ultra --overlay %command%
+xfsr-run --any --preset quality --upscaler edge --gamescope-fs %command%
 ```
 
 **Layer-only** (when `xfsr-run --check` shows `proxy*` and the game honors shrink):

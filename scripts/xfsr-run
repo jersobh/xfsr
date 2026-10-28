@@ -146,11 +146,10 @@ Options:
   -h, --help
 
   --any / --universal                     Upscale ANY title via gamescope nest (force game
-                                          window to preset render size). Best on AMD/Deck.
-                                          On NVIDIA proprietary the nest often stays black —
-                                          xfsr-run falls back to the Vulkan layer (set a low
-                                          in-game borderless res). XFSR_GAMESCOPE_FORCE=1 to
-                                          retry the nest anyway.
+                                          window to preset render size). Needed when the
+                                          Vulkan layer stays identity (Village, CS2, …).
+                                          NVIDIA: SDL+X11 host, WSI off. If the nest is
+                                          black: XFSR_GAMESCOPE_FORCE=0 (layer-only).
   --gamescope                             Same nest path as --any (without implying force).
                                           Layer off unless XFSR_GAMESCOPE_LAYER=1.
   --gamescope-filter fsr|nis|linear|nearest|sgsr
@@ -163,7 +162,7 @@ Options:
 
 Env: XFSR_*, XFSR_VERBOSE=1, XFSR_MANGOHUD=1, XFSR_ZINK=0|1, XFSR_GAMESCOPE_LAYER=1
      XFSR_GAMESCOPE_BACKEND=sdl|wayland|…  XFSR_GAMESCOPE_WSI=0|1 (NVIDIA default 0)
-     XFSR_GAMESCOPE_FS=1  XFSR_GAMESCOPE_FORCE=1 (NVIDIA: allow nest)
+     XFSR_GAMESCOPE_FS=1  XFSR_GAMESCOPE_FORCE=0 (disable nest → layer-only)
 Profiles: ~/.config/xfsr/profiles.conf  (see share/xfsr/profiles.example.conf)
 Roadmap:  ROADMAP.md
 
@@ -808,21 +807,18 @@ fi
 GAMESCOPE_KEEP_LAYER=0
 [[ "${XFSR_GAMESCOPE_LAYER:-0}" == "1" ]] && GAMESCOPE_KEEP_LAYER=1
 
-# Nested gamescope: on NVIDIA proprietary the nest window often stays black
-# (game renders, FOCUSED_APP_GFX set, host still blank — WSI on/off, -e,
-# autofocus all tried). Default OFF on NVIDIA; XFSR_GAMESCOPE_FORCE=1 to try.
-# AMD/Deck keep nest for --any / profile gamescope=1.
+# Nested gamescope: NVIDIA proprietary can still black the host window (Valve#1182).
+# Titles that ignore caps-shrink (Village, CS2, …) *need* the nest — trying is the
+# only way to upscale them. Opt out with XFSR_GAMESCOPE_FORCE=0 (layer-only fallback).
 _nv_gs=0
 [[ -f /usr/share/vulkan/icd.d/nvidia_icd.json || -f /etc/vulkan/icd.d/nvidia_icd.json ]] && _nv_gs=1
 if [[ $USE_GAMESCOPE -eq 1 && "${XFSR_GAMESCOPE_FORCE:-}" == "0" ]]; then
   echo "xfsr-run: XFSR_GAMESCOPE_FORCE=0 — disabling gamescope nest (layer only)." >&2
   USE_GAMESCOPE=0
   USE_ANY=0
-elif [[ $USE_GAMESCOPE -eq 1 && $_nv_gs -eq 1 && "${XFSR_GAMESCOPE_FORCE:-0}" != "1" ]]; then
-  echo "xfsr-run: NVIDIA — skipping gamescope nest (black host window on proprietary)." >&2
-  echo "xfsr-run: using Vulkan layer (caps-shrink). XFSR_GAMESCOPE_FORCE=1 to retry nest." >&2
-  USE_GAMESCOPE=0
-  USE_ANY=0
+elif [[ $USE_GAMESCOPE -eq 1 && $_nv_gs -eq 1 ]]; then
+  echo "xfsr-run: NVIDIA — gamescope nest (SDL+X11, WSI=0). If the host stays black:" >&2
+  echo "xfsr-run:   XFSR_GAMESCOPE_FORCE=0  → layer-only; or set a low Borderless res." >&2
 fi
 unset _nv_gs
 # Host present: on Plasma Wayland, SDL default is often invisible (Steam taskbar

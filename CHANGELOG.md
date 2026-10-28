@@ -7,6 +7,13 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- NVIDIA: do **not** auto-skip gamescope when `--any` / `--gamescope` / profile
+  `gamescope=1` is set (Village/CS2 need the nest; layer stays identity). Opt out
+  with `XFSR_GAMESCOPE_FORCE=0`. Village profile: `gamescope=1` + `gamescope_fs=1`
+  + NIS filter
+
 ## [0.6.0] — 2026-10-26
 
 ### Added
