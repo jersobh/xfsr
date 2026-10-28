@@ -5,13 +5,13 @@
 # compile CXX with /usr/bin/c++
 C_DEFINES = -DSHADER_DIR=\"/home/jeff/Projects/crossvulkan/build-pkg/shaders\" -DVK_NO_PROTOTYPES -DvkGetDeviceProcAddr=volk_vkGetDeviceProcAddr -DvkGetInstanceProcAddr=volk_vkGetInstanceProcAddr
 
-C_INCLUDES = -I/home/jeff/Projects/crossvulkan/build-pkg/_deps/vulkan_headers-src/include -I/home/jeff/Projects/crossvulkan/src -I/home/jeff/Projects/crossvulkan/build-pkg/_deps/volk-src -I/home/jeff/Projects/crossvulkan/third_party/ffx-fsr
+C_INCLUDES = -I/home/jeff/Projects/crossvulkan/build-pkg/_deps/vulkan_headers-src/include -I/home/jeff/Projects/crossvulkan/src -I/home/jeff/Projects/crossvulkan/layer -I/home/jeff/Projects/crossvulkan/build-pkg/_deps/volk-src -I/home/jeff/Projects/crossvulkan/third_party/ffx-fsr
 
 C_FLAGS = -O3 -DNDEBUG -fPIC -Wall -Wextra -fvisibility=hidden
 
 CXX_DEFINES = -DSHADER_DIR=\"/home/jeff/Projects/crossvulkan/build-pkg/shaders\" -DVK_NO_PROTOTYPES -DvkGetDeviceProcAddr=volk_vkGetDeviceProcAddr -DvkGetInstanceProcAddr=volk_vkGetInstanceProcAddr
 
-CXX_INCLUDES = -I/home/jeff/Projects/crossvulkan/build-pkg/_deps/vulkan_headers-src/include -I/home/jeff/Projects/crossvulkan/src -I/home/jeff/Projects/crossvulkan/build-pkg/_deps/volk-src -I/home/jeff/Projects/crossvulkan/third_party/ffx-fsr
+CXX_INCLUDES = -I/home/jeff/Projects/crossvulkan/build-pkg/_deps/vulkan_headers-src/include -I/home/jeff/Projects/crossvulkan/src -I/home/jeff/Projects/crossvulkan/layer -I/home/jeff/Projects/crossvulkan/build-pkg/_deps/volk-src -I/home/jeff/Projects/crossvulkan/third_party/ffx-fsr
 
 CXX_FLAGS = -O3 -DNDEBUG -std=gnu++17 -fPIC -Wall -Wextra -fvisibility=hidden
 

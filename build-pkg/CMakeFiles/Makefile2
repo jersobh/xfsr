@@ -67,6 +67,7 @@ all: CMakeFiles/shaders.dir/all
 all: CMakeFiles/xfsr_core.dir/all
 all: CMakeFiles/xfsr_core_layer.dir/all
 all: CMakeFiles/VkLayer_XFSR.dir/all
+all: CMakeFiles/xfsr_gl_shim.dir/all
 .PHONY : all
 
 # The main recursive "codegen" target.
@@ -74,6 +75,7 @@ codegen: CMakeFiles/shaders.dir/codegen
 codegen: CMakeFiles/xfsr_core.dir/codegen
 codegen: CMakeFiles/xfsr_core_layer.dir/codegen
 codegen: CMakeFiles/VkLayer_XFSR.dir/codegen
+codegen: CMakeFiles/xfsr_gl_shim.dir/codegen
 .PHONY : codegen
 
 # The main recursive "preinstall" target.
@@ -85,6 +87,7 @@ clean: CMakeFiles/shaders.dir/clean
 clean: CMakeFiles/xfsr_core.dir/clean
 clean: CMakeFiles/xfsr_core_layer.dir/clean
 clean: CMakeFiles/VkLayer_XFSR.dir/clean
+clean: CMakeFiles/xfsr_gl_shim.dir/clean
 clean: CMakeFiles/install-xfsr-layer.dir/clean
 clean: CMakeFiles/package-xfsr.dir/clean
 .PHONY : clean
@@ -96,12 +99,12 @@ clean: CMakeFiles/package-xfsr.dir/clean
 CMakeFiles/shaders.dir/all:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/shaders.dir/build.make CMakeFiles/shaders.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/shaders.dir/build.make CMakeFiles/shaders.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=5,6,7,8,9,10,11,12,13 "Built target shaders"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=5,6,7,8,9,10,11,12,13,14,15 "Built target shaders"
 .PHONY : CMakeFiles/shaders.dir/all
 
 # Build rule for subdir invocation for target.
 CMakeFiles/shaders.dir/rule: cmake_check_build_system
-	$(CMAKE_COMMAND) -E cmake_progress_start /home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles 9
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles 11
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 CMakeFiles/shaders.dir/all
 	$(CMAKE_COMMAND) -E cmake_progress_start /home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles 0
 .PHONY : CMakeFiles/shaders.dir/rule
@@ -113,7 +116,7 @@ shaders: CMakeFiles/shaders.dir/rule
 # codegen rule for target.
 CMakeFiles/shaders.dir/codegen:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/shaders.dir/build.make CMakeFiles/shaders.dir/codegen
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=5,6,7,8,9,10,11,12,13 "Finished codegen for target shaders"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=5,6,7,8,9,10,11,12,13,14,15 "Finished codegen for target shaders"
 .PHONY : CMakeFiles/shaders.dir/codegen
 
 # clean rule for target.
@@ -128,12 +131,12 @@ CMakeFiles/shaders.dir/clean:
 CMakeFiles/xfsr_core.dir/all: CMakeFiles/shaders.dir/all
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/xfsr_core.dir/build.make CMakeFiles/xfsr_core.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/xfsr_core.dir/build.make CMakeFiles/xfsr_core.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=14,15,16,17,18,19,20 "Built target xfsr_core"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=16,17,18,19,20,21,22,23,24,25 "Built target xfsr_core"
 .PHONY : CMakeFiles/xfsr_core.dir/all
 
 # Build rule for subdir invocation for target.
 CMakeFiles/xfsr_core.dir/rule: cmake_check_build_system
-	$(CMAKE_COMMAND) -E cmake_progress_start /home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles 16
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles 21
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 CMakeFiles/xfsr_core.dir/all
 	$(CMAKE_COMMAND) -E cmake_progress_start /home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles 0
 .PHONY : CMakeFiles/xfsr_core.dir/rule
@@ -145,7 +148,7 @@ xfsr_core: CMakeFiles/xfsr_core.dir/rule
 # codegen rule for target.
 CMakeFiles/xfsr_core.dir/codegen: CMakeFiles/shaders.dir/all
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/xfsr_core.dir/build.make CMakeFiles/xfsr_core.dir/codegen
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=14,15,16,17,18,19,20 "Finished codegen for target xfsr_core"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=16,17,18,19,20,21,22,23,24,25 "Finished codegen for target xfsr_core"
 .PHONY : CMakeFiles/xfsr_core.dir/codegen
 
 # clean rule for target.
@@ -160,12 +163,12 @@ CMakeFiles/xfsr_core.dir/clean:
 CMakeFiles/xfsr_core_layer.dir/all: CMakeFiles/shaders.dir/all
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/xfsr_core_layer.dir/build.make CMakeFiles/xfsr_core_layer.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/xfsr_core_layer.dir/build.make CMakeFiles/xfsr_core_layer.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=21,22,23,24,25,26,27 "Built target xfsr_core_layer"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=26,27,28,29,30,31,32,33,34,35,36 "Built target xfsr_core_layer"
 .PHONY : CMakeFiles/xfsr_core_layer.dir/all
 
 # Build rule for subdir invocation for target.
 CMakeFiles/xfsr_core_layer.dir/rule: cmake_check_build_system
-	$(CMAKE_COMMAND) -E cmake_progress_start /home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles 16
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles 22
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 CMakeFiles/xfsr_core_layer.dir/all
 	$(CMAKE_COMMAND) -E cmake_progress_start /home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles 0
 .PHONY : CMakeFiles/xfsr_core_layer.dir/rule
@@ -177,7 +180,7 @@ xfsr_core_layer: CMakeFiles/xfsr_core_layer.dir/rule
 # codegen rule for target.
 CMakeFiles/xfsr_core_layer.dir/codegen: CMakeFiles/shaders.dir/all
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/xfsr_core_layer.dir/build.make CMakeFiles/xfsr_core_layer.dir/codegen
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=21,22,23,24,25,26,27 "Finished codegen for target xfsr_core_layer"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=26,27,28,29,30,31,32,33,34,35,36 "Finished codegen for target xfsr_core_layer"
 .PHONY : CMakeFiles/xfsr_core_layer.dir/codegen
 
 # clean rule for target.
@@ -197,7 +200,7 @@ CMakeFiles/VkLayer_XFSR.dir/all: CMakeFiles/xfsr_core_layer.dir/all
 
 # Build rule for subdir invocation for target.
 CMakeFiles/VkLayer_XFSR.dir/rule: cmake_check_build_system
-	$(CMAKE_COMMAND) -E cmake_progress_start /home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles 18
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles 24
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 CMakeFiles/VkLayer_XFSR.dir/all
 	$(CMAKE_COMMAND) -E cmake_progress_start /home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles 0
 .PHONY : CMakeFiles/VkLayer_XFSR.dir/rule
@@ -218,10 +221,43 @@ CMakeFiles/VkLayer_XFSR.dir/clean:
 .PHONY : CMakeFiles/VkLayer_XFSR.dir/clean
 
 #=============================================================================
+# Target rules for target CMakeFiles/xfsr_gl_shim.dir
+
+# All Build rule for target.
+CMakeFiles/xfsr_gl_shim.dir/all:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/xfsr_gl_shim.dir/build.make CMakeFiles/xfsr_gl_shim.dir/depend
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/xfsr_gl_shim.dir/build.make CMakeFiles/xfsr_gl_shim.dir/build
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=37,38 "Built target xfsr_gl_shim"
+.PHONY : CMakeFiles/xfsr_gl_shim.dir/all
+
+# Build rule for subdir invocation for target.
+CMakeFiles/xfsr_gl_shim.dir/rule: cmake_check_build_system
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles 2
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 CMakeFiles/xfsr_gl_shim.dir/all
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles 0
+.PHONY : CMakeFiles/xfsr_gl_shim.dir/rule
+
+# Convenience name for target.
+xfsr_gl_shim: CMakeFiles/xfsr_gl_shim.dir/rule
+.PHONY : xfsr_gl_shim
+
+# codegen rule for target.
+CMakeFiles/xfsr_gl_shim.dir/codegen:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/xfsr_gl_shim.dir/build.make CMakeFiles/xfsr_gl_shim.dir/codegen
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=37,38 "Finished codegen for target xfsr_gl_shim"
+.PHONY : CMakeFiles/xfsr_gl_shim.dir/codegen
+
+# clean rule for target.
+CMakeFiles/xfsr_gl_shim.dir/clean:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/xfsr_gl_shim.dir/build.make CMakeFiles/xfsr_gl_shim.dir/clean
+.PHONY : CMakeFiles/xfsr_gl_shim.dir/clean
+
+#=============================================================================
 # Target rules for target CMakeFiles/install-xfsr-layer.dir
 
 # All Build rule for target.
 CMakeFiles/install-xfsr-layer.dir/all: CMakeFiles/VkLayer_XFSR.dir/all
+CMakeFiles/install-xfsr-layer.dir/all: CMakeFiles/xfsr_gl_shim.dir/all
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/install-xfsr-layer.dir/build.make CMakeFiles/install-xfsr-layer.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/install-xfsr-layer.dir/build.make CMakeFiles/install-xfsr-layer.dir/build
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=3 "Built target install-xfsr-layer"
@@ -229,7 +265,7 @@ CMakeFiles/install-xfsr-layer.dir/all: CMakeFiles/VkLayer_XFSR.dir/all
 
 # Build rule for subdir invocation for target.
 CMakeFiles/install-xfsr-layer.dir/rule: cmake_check_build_system
-	$(CMAKE_COMMAND) -E cmake_progress_start /home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles 19
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles 27
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 CMakeFiles/install-xfsr-layer.dir/all
 	$(CMAKE_COMMAND) -E cmake_progress_start /home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles 0
 .PHONY : CMakeFiles/install-xfsr-layer.dir/rule
@@ -240,6 +276,7 @@ install-xfsr-layer: CMakeFiles/install-xfsr-layer.dir/rule
 
 # codegen rule for target.
 CMakeFiles/install-xfsr-layer.dir/codegen: CMakeFiles/VkLayer_XFSR.dir/all
+CMakeFiles/install-xfsr-layer.dir/codegen: CMakeFiles/xfsr_gl_shim.dir/all
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/install-xfsr-layer.dir/build.make CMakeFiles/install-xfsr-layer.dir/codegen
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=3 "Finished codegen for target install-xfsr-layer"
 .PHONY : CMakeFiles/install-xfsr-layer.dir/codegen
@@ -254,6 +291,7 @@ CMakeFiles/install-xfsr-layer.dir/clean:
 
 # All Build rule for target.
 CMakeFiles/package-xfsr.dir/all: CMakeFiles/VkLayer_XFSR.dir/all
+CMakeFiles/package-xfsr.dir/all: CMakeFiles/xfsr_gl_shim.dir/all
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/package-xfsr.dir/build.make CMakeFiles/package-xfsr.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/package-xfsr.dir/build.make CMakeFiles/package-xfsr.dir/build
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=4 "Built target package-xfsr"
@@ -261,7 +299,7 @@ CMakeFiles/package-xfsr.dir/all: CMakeFiles/VkLayer_XFSR.dir/all
 
 # Build rule for subdir invocation for target.
 CMakeFiles/package-xfsr.dir/rule: cmake_check_build_system
-	$(CMAKE_COMMAND) -E cmake_progress_start /home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles 19
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles 27
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 CMakeFiles/package-xfsr.dir/all
 	$(CMAKE_COMMAND) -E cmake_progress_start /home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles 0
 .PHONY : CMakeFiles/package-xfsr.dir/rule
@@ -272,6 +310,7 @@ package-xfsr: CMakeFiles/package-xfsr.dir/rule
 
 # codegen rule for target.
 CMakeFiles/package-xfsr.dir/codegen: CMakeFiles/VkLayer_XFSR.dir/all
+CMakeFiles/package-xfsr.dir/codegen: CMakeFiles/xfsr_gl_shim.dir/all
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/package-xfsr.dir/build.make CMakeFiles/package-xfsr.dir/codegen
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=4 "Finished codegen for target package-xfsr"
 .PHONY : CMakeFiles/package-xfsr.dir/codegen

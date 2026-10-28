@@ -114,10 +114,38 @@ CMakeFiles/xfsr_core_layer.dir/src/fsr_pass.cpp.s: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/xfsr_core_layer.dir/src/fsr_pass.cpp.s"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/jeff/Projects/crossvulkan/src/fsr_pass.cpp -o CMakeFiles/xfsr_core_layer.dir/src/fsr_pass.cpp.s
 
+CMakeFiles/xfsr_core_layer.dir/src/nis_pass.cpp.o: CMakeFiles/xfsr_core_layer.dir/flags.make
+CMakeFiles/xfsr_core_layer.dir/src/nis_pass.cpp.o: /home/jeff/Projects/crossvulkan/src/nis_pass.cpp
+CMakeFiles/xfsr_core_layer.dir/src/nis_pass.cpp.o: CMakeFiles/xfsr_core_layer.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=$(CMAKE_PROGRESS_4) "Building CXX object CMakeFiles/xfsr_core_layer.dir/src/nis_pass.cpp.o"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/xfsr_core_layer.dir/src/nis_pass.cpp.o -MF CMakeFiles/xfsr_core_layer.dir/src/nis_pass.cpp.o.d -o CMakeFiles/xfsr_core_layer.dir/src/nis_pass.cpp.o -c /home/jeff/Projects/crossvulkan/src/nis_pass.cpp
+
+CMakeFiles/xfsr_core_layer.dir/src/nis_pass.cpp.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/xfsr_core_layer.dir/src/nis_pass.cpp.i"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/jeff/Projects/crossvulkan/src/nis_pass.cpp > CMakeFiles/xfsr_core_layer.dir/src/nis_pass.cpp.i
+
+CMakeFiles/xfsr_core_layer.dir/src/nis_pass.cpp.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/xfsr_core_layer.dir/src/nis_pass.cpp.s"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/jeff/Projects/crossvulkan/src/nis_pass.cpp -o CMakeFiles/xfsr_core_layer.dir/src/nis_pass.cpp.s
+
+CMakeFiles/xfsr_core_layer.dir/src/edge_pass.cpp.o: CMakeFiles/xfsr_core_layer.dir/flags.make
+CMakeFiles/xfsr_core_layer.dir/src/edge_pass.cpp.o: /home/jeff/Projects/crossvulkan/src/edge_pass.cpp
+CMakeFiles/xfsr_core_layer.dir/src/edge_pass.cpp.o: CMakeFiles/xfsr_core_layer.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=$(CMAKE_PROGRESS_5) "Building CXX object CMakeFiles/xfsr_core_layer.dir/src/edge_pass.cpp.o"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/xfsr_core_layer.dir/src/edge_pass.cpp.o -MF CMakeFiles/xfsr_core_layer.dir/src/edge_pass.cpp.o.d -o CMakeFiles/xfsr_core_layer.dir/src/edge_pass.cpp.o -c /home/jeff/Projects/crossvulkan/src/edge_pass.cpp
+
+CMakeFiles/xfsr_core_layer.dir/src/edge_pass.cpp.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/xfsr_core_layer.dir/src/edge_pass.cpp.i"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/jeff/Projects/crossvulkan/src/edge_pass.cpp > CMakeFiles/xfsr_core_layer.dir/src/edge_pass.cpp.i
+
+CMakeFiles/xfsr_core_layer.dir/src/edge_pass.cpp.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/xfsr_core_layer.dir/src/edge_pass.cpp.s"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/jeff/Projects/crossvulkan/src/edge_pass.cpp -o CMakeFiles/xfsr_core_layer.dir/src/edge_pass.cpp.s
+
 CMakeFiles/xfsr_core_layer.dir/src/gpu_image.cpp.o: CMakeFiles/xfsr_core_layer.dir/flags.make
 CMakeFiles/xfsr_core_layer.dir/src/gpu_image.cpp.o: /home/jeff/Projects/crossvulkan/src/gpu_image.cpp
 CMakeFiles/xfsr_core_layer.dir/src/gpu_image.cpp.o: CMakeFiles/xfsr_core_layer.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=$(CMAKE_PROGRESS_4) "Building CXX object CMakeFiles/xfsr_core_layer.dir/src/gpu_image.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=$(CMAKE_PROGRESS_6) "Building CXX object CMakeFiles/xfsr_core_layer.dir/src/gpu_image.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/xfsr_core_layer.dir/src/gpu_image.cpp.o -MF CMakeFiles/xfsr_core_layer.dir/src/gpu_image.cpp.o.d -o CMakeFiles/xfsr_core_layer.dir/src/gpu_image.cpp.o -c /home/jeff/Projects/crossvulkan/src/gpu_image.cpp
 
 CMakeFiles/xfsr_core_layer.dir/src/gpu_image.cpp.i: cmake_force
@@ -128,10 +156,24 @@ CMakeFiles/xfsr_core_layer.dir/src/gpu_image.cpp.s: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/xfsr_core_layer.dir/src/gpu_image.cpp.s"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/jeff/Projects/crossvulkan/src/gpu_image.cpp -o CMakeFiles/xfsr_core_layer.dir/src/gpu_image.cpp.s
 
+CMakeFiles/xfsr_core_layer.dir/src/offload_roundtrip.cpp.o: CMakeFiles/xfsr_core_layer.dir/flags.make
+CMakeFiles/xfsr_core_layer.dir/src/offload_roundtrip.cpp.o: /home/jeff/Projects/crossvulkan/src/offload_roundtrip.cpp
+CMakeFiles/xfsr_core_layer.dir/src/offload_roundtrip.cpp.o: CMakeFiles/xfsr_core_layer.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=$(CMAKE_PROGRESS_7) "Building CXX object CMakeFiles/xfsr_core_layer.dir/src/offload_roundtrip.cpp.o"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/xfsr_core_layer.dir/src/offload_roundtrip.cpp.o -MF CMakeFiles/xfsr_core_layer.dir/src/offload_roundtrip.cpp.o.d -o CMakeFiles/xfsr_core_layer.dir/src/offload_roundtrip.cpp.o -c /home/jeff/Projects/crossvulkan/src/offload_roundtrip.cpp
+
+CMakeFiles/xfsr_core_layer.dir/src/offload_roundtrip.cpp.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/xfsr_core_layer.dir/src/offload_roundtrip.cpp.i"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/jeff/Projects/crossvulkan/src/offload_roundtrip.cpp > CMakeFiles/xfsr_core_layer.dir/src/offload_roundtrip.cpp.i
+
+CMakeFiles/xfsr_core_layer.dir/src/offload_roundtrip.cpp.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/xfsr_core_layer.dir/src/offload_roundtrip.cpp.s"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/jeff/Projects/crossvulkan/src/offload_roundtrip.cpp -o CMakeFiles/xfsr_core_layer.dir/src/offload_roundtrip.cpp.s
+
 CMakeFiles/xfsr_core_layer.dir/src/present.cpp.o: CMakeFiles/xfsr_core_layer.dir/flags.make
 CMakeFiles/xfsr_core_layer.dir/src/present.cpp.o: /home/jeff/Projects/crossvulkan/src/present.cpp
 CMakeFiles/xfsr_core_layer.dir/src/present.cpp.o: CMakeFiles/xfsr_core_layer.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=$(CMAKE_PROGRESS_5) "Building CXX object CMakeFiles/xfsr_core_layer.dir/src/present.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=$(CMAKE_PROGRESS_8) "Building CXX object CMakeFiles/xfsr_core_layer.dir/src/present.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/xfsr_core_layer.dir/src/present.cpp.o -MF CMakeFiles/xfsr_core_layer.dir/src/present.cpp.o.d -o CMakeFiles/xfsr_core_layer.dir/src/present.cpp.o -c /home/jeff/Projects/crossvulkan/src/present.cpp
 
 CMakeFiles/xfsr_core_layer.dir/src/present.cpp.i: cmake_force
@@ -145,7 +187,7 @@ CMakeFiles/xfsr_core_layer.dir/src/present.cpp.s: cmake_force
 CMakeFiles/xfsr_core_layer.dir/_deps/volk-src/volk.c.o: CMakeFiles/xfsr_core_layer.dir/flags.make
 CMakeFiles/xfsr_core_layer.dir/_deps/volk-src/volk.c.o: _deps/volk-src/volk.c
 CMakeFiles/xfsr_core_layer.dir/_deps/volk-src/volk.c.o: CMakeFiles/xfsr_core_layer.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=$(CMAKE_PROGRESS_6) "Building C object CMakeFiles/xfsr_core_layer.dir/_deps/volk-src/volk.c.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=$(CMAKE_PROGRESS_9) "Building C object CMakeFiles/xfsr_core_layer.dir/_deps/volk-src/volk.c.o"
 	/usr/bin/cc $(C_DEFINES) $(C_INCLUDES) $(C_FLAGS) -MD -MT CMakeFiles/xfsr_core_layer.dir/_deps/volk-src/volk.c.o -MF CMakeFiles/xfsr_core_layer.dir/_deps/volk-src/volk.c.o.d -o CMakeFiles/xfsr_core_layer.dir/_deps/volk-src/volk.c.o -c /home/jeff/Projects/crossvulkan/build-pkg/_deps/volk-src/volk.c
 
 CMakeFiles/xfsr_core_layer.dir/_deps/volk-src/volk.c.i: cmake_force
@@ -159,7 +201,7 @@ CMakeFiles/xfsr_core_layer.dir/_deps/volk-src/volk.c.s: cmake_force
 CMakeFiles/xfsr_core_layer.dir/layer/xfsr_layer.cpp.o: CMakeFiles/xfsr_core_layer.dir/flags.make
 CMakeFiles/xfsr_core_layer.dir/layer/xfsr_layer.cpp.o: /home/jeff/Projects/crossvulkan/layer/xfsr_layer.cpp
 CMakeFiles/xfsr_core_layer.dir/layer/xfsr_layer.cpp.o: CMakeFiles/xfsr_core_layer.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=$(CMAKE_PROGRESS_7) "Building CXX object CMakeFiles/xfsr_core_layer.dir/layer/xfsr_layer.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=$(CMAKE_PROGRESS_10) "Building CXX object CMakeFiles/xfsr_core_layer.dir/layer/xfsr_layer.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/xfsr_core_layer.dir/layer/xfsr_layer.cpp.o -MF CMakeFiles/xfsr_core_layer.dir/layer/xfsr_layer.cpp.o.d -o CMakeFiles/xfsr_core_layer.dir/layer/xfsr_layer.cpp.o -c /home/jeff/Projects/crossvulkan/layer/xfsr_layer.cpp
 
 CMakeFiles/xfsr_core_layer.dir/layer/xfsr_layer.cpp.i: cmake_force
@@ -170,13 +212,31 @@ CMakeFiles/xfsr_core_layer.dir/layer/xfsr_layer.cpp.s: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/xfsr_core_layer.dir/layer/xfsr_layer.cpp.s"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/jeff/Projects/crossvulkan/layer/xfsr_layer.cpp -o CMakeFiles/xfsr_core_layer.dir/layer/xfsr_layer.cpp.s
 
+CMakeFiles/xfsr_core_layer.dir/layer/xfsr_controls.cpp.o: CMakeFiles/xfsr_core_layer.dir/flags.make
+CMakeFiles/xfsr_core_layer.dir/layer/xfsr_controls.cpp.o: /home/jeff/Projects/crossvulkan/layer/xfsr_controls.cpp
+CMakeFiles/xfsr_core_layer.dir/layer/xfsr_controls.cpp.o: CMakeFiles/xfsr_core_layer.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=$(CMAKE_PROGRESS_11) "Building CXX object CMakeFiles/xfsr_core_layer.dir/layer/xfsr_controls.cpp.o"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/xfsr_core_layer.dir/layer/xfsr_controls.cpp.o -MF CMakeFiles/xfsr_core_layer.dir/layer/xfsr_controls.cpp.o.d -o CMakeFiles/xfsr_core_layer.dir/layer/xfsr_controls.cpp.o -c /home/jeff/Projects/crossvulkan/layer/xfsr_controls.cpp
+
+CMakeFiles/xfsr_core_layer.dir/layer/xfsr_controls.cpp.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/xfsr_core_layer.dir/layer/xfsr_controls.cpp.i"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/jeff/Projects/crossvulkan/layer/xfsr_controls.cpp > CMakeFiles/xfsr_core_layer.dir/layer/xfsr_controls.cpp.i
+
+CMakeFiles/xfsr_core_layer.dir/layer/xfsr_controls.cpp.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/xfsr_core_layer.dir/layer/xfsr_controls.cpp.s"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/jeff/Projects/crossvulkan/layer/xfsr_controls.cpp -o CMakeFiles/xfsr_core_layer.dir/layer/xfsr_controls.cpp.s
+
 xfsr_core_layer: CMakeFiles/xfsr_core_layer.dir/src/dual_devices.cpp.o
 xfsr_core_layer: CMakeFiles/xfsr_core_layer.dir/src/frame_transfer.cpp.o
 xfsr_core_layer: CMakeFiles/xfsr_core_layer.dir/src/fsr_pass.cpp.o
+xfsr_core_layer: CMakeFiles/xfsr_core_layer.dir/src/nis_pass.cpp.o
+xfsr_core_layer: CMakeFiles/xfsr_core_layer.dir/src/edge_pass.cpp.o
 xfsr_core_layer: CMakeFiles/xfsr_core_layer.dir/src/gpu_image.cpp.o
+xfsr_core_layer: CMakeFiles/xfsr_core_layer.dir/src/offload_roundtrip.cpp.o
 xfsr_core_layer: CMakeFiles/xfsr_core_layer.dir/src/present.cpp.o
 xfsr_core_layer: CMakeFiles/xfsr_core_layer.dir/_deps/volk-src/volk.c.o
 xfsr_core_layer: CMakeFiles/xfsr_core_layer.dir/layer/xfsr_layer.cpp.o
+xfsr_core_layer: CMakeFiles/xfsr_core_layer.dir/layer/xfsr_controls.cpp.o
 xfsr_core_layer: CMakeFiles/xfsr_core_layer.dir/build.make
 .PHONY : xfsr_core_layer
 

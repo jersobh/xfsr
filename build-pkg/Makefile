@@ -169,6 +169,19 @@ VkLayer_XFSR/fast:
 .PHONY : VkLayer_XFSR/fast
 
 #=============================================================================
+# Target rules for targets named xfsr_gl_shim
+
+# Build rule for target.
+xfsr_gl_shim: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 xfsr_gl_shim
+.PHONY : xfsr_gl_shim
+
+# fast build rule for target.
+xfsr_gl_shim/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/xfsr_gl_shim.dir/build.make CMakeFiles/xfsr_gl_shim.dir/build
+.PHONY : xfsr_gl_shim/fast
+
+#=============================================================================
 # Target rules for targets named install-xfsr-layer
 
 # Build rule for target.
@@ -220,6 +233,54 @@ _deps/volk-src/volk.c.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/xfsr_core.dir/build.make CMakeFiles/xfsr_core.dir/_deps/volk-src/volk.c.s
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/xfsr_core_layer.dir/build.make CMakeFiles/xfsr_core_layer.dir/_deps/volk-src/volk.c.s
 .PHONY : _deps/volk-src/volk.c.s
+
+gl/xfsr_gl_shim.o: gl/xfsr_gl_shim.c.o
+.PHONY : gl/xfsr_gl_shim.o
+
+# target to build an object file
+gl/xfsr_gl_shim.c.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/xfsr_gl_shim.dir/build.make CMakeFiles/xfsr_gl_shim.dir/gl/xfsr_gl_shim.c.o
+.PHONY : gl/xfsr_gl_shim.c.o
+
+gl/xfsr_gl_shim.i: gl/xfsr_gl_shim.c.i
+.PHONY : gl/xfsr_gl_shim.i
+
+# target to preprocess a source file
+gl/xfsr_gl_shim.c.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/xfsr_gl_shim.dir/build.make CMakeFiles/xfsr_gl_shim.dir/gl/xfsr_gl_shim.c.i
+.PHONY : gl/xfsr_gl_shim.c.i
+
+gl/xfsr_gl_shim.s: gl/xfsr_gl_shim.c.s
+.PHONY : gl/xfsr_gl_shim.s
+
+# target to generate assembly for a file
+gl/xfsr_gl_shim.c.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/xfsr_gl_shim.dir/build.make CMakeFiles/xfsr_gl_shim.dir/gl/xfsr_gl_shim.c.s
+.PHONY : gl/xfsr_gl_shim.c.s
+
+layer/xfsr_controls.o: layer/xfsr_controls.cpp.o
+.PHONY : layer/xfsr_controls.o
+
+# target to build an object file
+layer/xfsr_controls.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/xfsr_core_layer.dir/build.make CMakeFiles/xfsr_core_layer.dir/layer/xfsr_controls.cpp.o
+.PHONY : layer/xfsr_controls.cpp.o
+
+layer/xfsr_controls.i: layer/xfsr_controls.cpp.i
+.PHONY : layer/xfsr_controls.i
+
+# target to preprocess a source file
+layer/xfsr_controls.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/xfsr_core_layer.dir/build.make CMakeFiles/xfsr_core_layer.dir/layer/xfsr_controls.cpp.i
+.PHONY : layer/xfsr_controls.cpp.i
+
+layer/xfsr_controls.s: layer/xfsr_controls.cpp.s
+.PHONY : layer/xfsr_controls.s
+
+# target to generate assembly for a file
+layer/xfsr_controls.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/xfsr_core_layer.dir/build.make CMakeFiles/xfsr_core_layer.dir/layer/xfsr_controls.cpp.s
+.PHONY : layer/xfsr_controls.cpp.s
 
 layer/xfsr_layer.o: layer/xfsr_layer.cpp.o
 .PHONY : layer/xfsr_layer.o
@@ -295,6 +356,33 @@ src/dual_devices.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/xfsr_core.dir/build.make CMakeFiles/xfsr_core.dir/src/dual_devices.cpp.s
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/xfsr_core_layer.dir/build.make CMakeFiles/xfsr_core_layer.dir/src/dual_devices.cpp.s
 .PHONY : src/dual_devices.cpp.s
+
+src/edge_pass.o: src/edge_pass.cpp.o
+.PHONY : src/edge_pass.o
+
+# target to build an object file
+src/edge_pass.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/xfsr_core.dir/build.make CMakeFiles/xfsr_core.dir/src/edge_pass.cpp.o
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/xfsr_core_layer.dir/build.make CMakeFiles/xfsr_core_layer.dir/src/edge_pass.cpp.o
+.PHONY : src/edge_pass.cpp.o
+
+src/edge_pass.i: src/edge_pass.cpp.i
+.PHONY : src/edge_pass.i
+
+# target to preprocess a source file
+src/edge_pass.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/xfsr_core.dir/build.make CMakeFiles/xfsr_core.dir/src/edge_pass.cpp.i
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/xfsr_core_layer.dir/build.make CMakeFiles/xfsr_core_layer.dir/src/edge_pass.cpp.i
+.PHONY : src/edge_pass.cpp.i
+
+src/edge_pass.s: src/edge_pass.cpp.s
+.PHONY : src/edge_pass.s
+
+# target to generate assembly for a file
+src/edge_pass.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/xfsr_core.dir/build.make CMakeFiles/xfsr_core.dir/src/edge_pass.cpp.s
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/xfsr_core_layer.dir/build.make CMakeFiles/xfsr_core_layer.dir/src/edge_pass.cpp.s
+.PHONY : src/edge_pass.cpp.s
 
 src/frame_transfer.o: src/frame_transfer.cpp.o
 .PHONY : src/frame_transfer.o
@@ -377,6 +465,60 @@ src/gpu_image.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/xfsr_core_layer.dir/build.make CMakeFiles/xfsr_core_layer.dir/src/gpu_image.cpp.s
 .PHONY : src/gpu_image.cpp.s
 
+src/nis_pass.o: src/nis_pass.cpp.o
+.PHONY : src/nis_pass.o
+
+# target to build an object file
+src/nis_pass.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/xfsr_core.dir/build.make CMakeFiles/xfsr_core.dir/src/nis_pass.cpp.o
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/xfsr_core_layer.dir/build.make CMakeFiles/xfsr_core_layer.dir/src/nis_pass.cpp.o
+.PHONY : src/nis_pass.cpp.o
+
+src/nis_pass.i: src/nis_pass.cpp.i
+.PHONY : src/nis_pass.i
+
+# target to preprocess a source file
+src/nis_pass.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/xfsr_core.dir/build.make CMakeFiles/xfsr_core.dir/src/nis_pass.cpp.i
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/xfsr_core_layer.dir/build.make CMakeFiles/xfsr_core_layer.dir/src/nis_pass.cpp.i
+.PHONY : src/nis_pass.cpp.i
+
+src/nis_pass.s: src/nis_pass.cpp.s
+.PHONY : src/nis_pass.s
+
+# target to generate assembly for a file
+src/nis_pass.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/xfsr_core.dir/build.make CMakeFiles/xfsr_core.dir/src/nis_pass.cpp.s
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/xfsr_core_layer.dir/build.make CMakeFiles/xfsr_core_layer.dir/src/nis_pass.cpp.s
+.PHONY : src/nis_pass.cpp.s
+
+src/offload_roundtrip.o: src/offload_roundtrip.cpp.o
+.PHONY : src/offload_roundtrip.o
+
+# target to build an object file
+src/offload_roundtrip.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/xfsr_core.dir/build.make CMakeFiles/xfsr_core.dir/src/offload_roundtrip.cpp.o
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/xfsr_core_layer.dir/build.make CMakeFiles/xfsr_core_layer.dir/src/offload_roundtrip.cpp.o
+.PHONY : src/offload_roundtrip.cpp.o
+
+src/offload_roundtrip.i: src/offload_roundtrip.cpp.i
+.PHONY : src/offload_roundtrip.i
+
+# target to preprocess a source file
+src/offload_roundtrip.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/xfsr_core.dir/build.make CMakeFiles/xfsr_core.dir/src/offload_roundtrip.cpp.i
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/xfsr_core_layer.dir/build.make CMakeFiles/xfsr_core_layer.dir/src/offload_roundtrip.cpp.i
+.PHONY : src/offload_roundtrip.cpp.i
+
+src/offload_roundtrip.s: src/offload_roundtrip.cpp.s
+.PHONY : src/offload_roundtrip.s
+
+# target to generate assembly for a file
+src/offload_roundtrip.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/xfsr_core.dir/build.make CMakeFiles/xfsr_core.dir/src/offload_roundtrip.cpp.s
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/xfsr_core_layer.dir/build.make CMakeFiles/xfsr_core_layer.dir/src/offload_roundtrip.cpp.s
+.PHONY : src/offload_roundtrip.cpp.s
+
 src/present.o: src/present.cpp.o
 .PHONY : src/present.o
 
@@ -418,9 +560,16 @@ help:
 	@echo "... VkLayer_XFSR"
 	@echo "... xfsr_core"
 	@echo "... xfsr_core_layer"
+	@echo "... xfsr_gl_shim"
 	@echo "... _deps/volk-src/volk.o"
 	@echo "... _deps/volk-src/volk.i"
 	@echo "... _deps/volk-src/volk.s"
+	@echo "... gl/xfsr_gl_shim.o"
+	@echo "... gl/xfsr_gl_shim.i"
+	@echo "... gl/xfsr_gl_shim.s"
+	@echo "... layer/xfsr_controls.o"
+	@echo "... layer/xfsr_controls.i"
+	@echo "... layer/xfsr_controls.s"
 	@echo "... layer/xfsr_layer.o"
 	@echo "... layer/xfsr_layer.i"
 	@echo "... layer/xfsr_layer.s"
@@ -430,6 +579,9 @@ help:
 	@echo "... src/dual_devices.o"
 	@echo "... src/dual_devices.i"
 	@echo "... src/dual_devices.s"
+	@echo "... src/edge_pass.o"
+	@echo "... src/edge_pass.i"
+	@echo "... src/edge_pass.s"
 	@echo "... src/frame_transfer.o"
 	@echo "... src/frame_transfer.i"
 	@echo "... src/frame_transfer.s"
@@ -439,6 +591,12 @@ help:
 	@echo "... src/gpu_image.o"
 	@echo "... src/gpu_image.i"
 	@echo "... src/gpu_image.s"
+	@echo "... src/nis_pass.o"
+	@echo "... src/nis_pass.i"
+	@echo "... src/nis_pass.s"
+	@echo "... src/offload_roundtrip.o"
+	@echo "... src/offload_roundtrip.i"
+	@echo "... src/offload_roundtrip.s"
 	@echo "... src/present.o"
 	@echo "... src/present.i"
 	@echo "... src/present.s"

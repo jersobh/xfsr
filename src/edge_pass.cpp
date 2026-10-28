@@ -31,14 +31,14 @@ float parseFloat01(const char* e) {
 }
 
 bool parsePerfModeEnv(const char* e) {
-    if (!e || !e[0]) return false;
+    if (!e || !e[0]) return true;
     if (e[0] == '1') return true;
     if (std::strcmp(e, "perf") == 0 || std::strcmp(e, "lite") == 0 ||
         std::strcmp(e, "edge-lite") == 0 || std::strcmp(e, "edge_lite") == 0)
         return true;
     if (e[0] == '0' || std::strcmp(e, "quality") == 0 || std::strcmp(e, "hq") == 0)
         return false;
-    return false;
+    return true;
 }
 
 void createMappedUbo(DeviceContext* ctx, VkBuffer* buf, VkDeviceMemory* mem, void** mapped) {

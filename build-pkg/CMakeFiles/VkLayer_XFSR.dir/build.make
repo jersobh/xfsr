@@ -95,19 +95,27 @@ VkLayer_XFSR_EXTERNAL_OBJECTS = \
 "/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles/xfsr_core_layer.dir/src/dual_devices.cpp.o" \
 "/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles/xfsr_core_layer.dir/src/frame_transfer.cpp.o" \
 "/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles/xfsr_core_layer.dir/src/fsr_pass.cpp.o" \
+"/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles/xfsr_core_layer.dir/src/nis_pass.cpp.o" \
+"/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles/xfsr_core_layer.dir/src/edge_pass.cpp.o" \
 "/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles/xfsr_core_layer.dir/src/gpu_image.cpp.o" \
+"/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles/xfsr_core_layer.dir/src/offload_roundtrip.cpp.o" \
 "/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles/xfsr_core_layer.dir/src/present.cpp.o" \
 "/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles/xfsr_core_layer.dir/_deps/volk-src/volk.c.o" \
-"/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles/xfsr_core_layer.dir/layer/xfsr_layer.cpp.o"
+"/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles/xfsr_core_layer.dir/layer/xfsr_layer.cpp.o" \
+"/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles/xfsr_core_layer.dir/layer/xfsr_controls.cpp.o"
 
 libVkLayer_XFSR.so: CMakeFiles/VkLayer_XFSR.dir/layer/xfsr_layer_entry.c.o
 libVkLayer_XFSR.so: CMakeFiles/xfsr_core_layer.dir/src/dual_devices.cpp.o
 libVkLayer_XFSR.so: CMakeFiles/xfsr_core_layer.dir/src/frame_transfer.cpp.o
 libVkLayer_XFSR.so: CMakeFiles/xfsr_core_layer.dir/src/fsr_pass.cpp.o
+libVkLayer_XFSR.so: CMakeFiles/xfsr_core_layer.dir/src/nis_pass.cpp.o
+libVkLayer_XFSR.so: CMakeFiles/xfsr_core_layer.dir/src/edge_pass.cpp.o
 libVkLayer_XFSR.so: CMakeFiles/xfsr_core_layer.dir/src/gpu_image.cpp.o
+libVkLayer_XFSR.so: CMakeFiles/xfsr_core_layer.dir/src/offload_roundtrip.cpp.o
 libVkLayer_XFSR.so: CMakeFiles/xfsr_core_layer.dir/src/present.cpp.o
 libVkLayer_XFSR.so: CMakeFiles/xfsr_core_layer.dir/_deps/volk-src/volk.c.o
 libVkLayer_XFSR.so: CMakeFiles/xfsr_core_layer.dir/layer/xfsr_layer.cpp.o
+libVkLayer_XFSR.so: CMakeFiles/xfsr_core_layer.dir/layer/xfsr_controls.cpp.o
 libVkLayer_XFSR.so: CMakeFiles/VkLayer_XFSR.dir/build.make
 libVkLayer_XFSR.so: CMakeFiles/VkLayer_XFSR.dir/compiler_depend.ts
 libVkLayer_XFSR.so: CMakeFiles/VkLayer_XFSR.dir/link.txt

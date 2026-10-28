@@ -58,7 +58,7 @@ ONE_WAY=""
 ONE_WAY_CLI=0
 RCAS="${XFSR_RCAS:-${CROSSVULKAN_RCAS:-1}}"
 RCAS_CLI=0
-EDGE_MODE="${XFSR_EDGE_MODE:-quality}"
+EDGE_MODE="${XFSR_EDGE_MODE:-perf}"
 EDGE_MODE_CLI=0
 EDGE_SHARP="${XFSR_EDGE_SHARPNESS:-}"
 EDGE_SHARP_CLI=0
@@ -152,6 +152,7 @@ Options:
                                           black: XFSR_GAMESCOPE_FORCE=0 (layer-only).
   --gamescope                             Same nest path as --any (without implying force).
                                           Layer off unless XFSR_GAMESCOPE_LAYER=1.
+  --no-gamescope / --no-nested            Disable gamescope nest (force layer path).
   --gamescope-filter fsr|nis|linear|nearest|sgsr
                                           Override gamescope -F (default from --upscaler)
   --gamescope-backend auto|sdl|wayland|drm
@@ -432,6 +433,8 @@ while [[ $# -gt 0 ]]; do
     --any|--universal)
       USE_ANY=1; USE_GAMESCOPE=1; GAMESCOPE_CLI=1; USE_NESTED=1; shift ;;
     --nested|--gamescope) USE_GAMESCOPE=1; GAMESCOPE_CLI=1; USE_NESTED=1; shift ;;
+    --no-gamescope|--no-nested)
+      USE_GAMESCOPE=0; GAMESCOPE_CLI=1; USE_ANY=0; USE_NESTED=0; shift ;;
     --gamescope-filter)
       GAMESCOPE_FILTER="${2:?}"; GAMESCOPE_CLI=1; USE_GAMESCOPE=1; shift 2 ;;
     --gamescope-filter=*)

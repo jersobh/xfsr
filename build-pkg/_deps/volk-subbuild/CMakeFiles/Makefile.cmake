@@ -10,10 +10,8 @@ set(CMAKE_MAKEFILE_DEPENDS
   "CMakeFiles/4.4.4/CMakeSystem.cmake"
   "CMakeLists.txt"
   "volk-populate-prefix/tmp/volk-populate-mkdirs.cmake"
-  "/usr/share/cmake/Modules/CMakeDetermineSystem.cmake"
   "/usr/share/cmake/Modules/CMakeGenericSystem.cmake"
   "/usr/share/cmake/Modules/CMakeInitializeConfigs.cmake"
-  "/usr/share/cmake/Modules/CMakeSystem.cmake.in"
   "/usr/share/cmake/Modules/CMakeSystemSpecificInformation.cmake"
   "/usr/share/cmake/Modules/CMakeSystemSpecificInitialize.cmake"
   "/usr/share/cmake/Modules/ExternalProject.cmake"
@@ -38,7 +36,6 @@ set(CMAKE_MAKEFILE_OUTPUTS
 
 # Byproducts of CMake generate step:
 set(CMAKE_MAKEFILE_PRODUCTS
-  "CMakeFiles/4.4.4/CMakeSystem.cmake"
   "volk-populate-prefix/tmp/volk-populate-mkdirs.cmake"
   "volk-populate-prefix/tmp/volk-populate-gitclone.cmake"
   "volk-populate-prefix/src/volk-populate-stamp/volk-populate-gitinfo.txt"

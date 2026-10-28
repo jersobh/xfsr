@@ -67,6 +67,7 @@ include CMakeFiles/install-xfsr-layer.dir/compiler_depend.make
 include CMakeFiles/install-xfsr-layer.dir/progress.make
 
 CMakeFiles/install-xfsr-layer: libVkLayer_XFSR.so
+CMakeFiles/install-xfsr-layer: libxfsr_gl_shim.so
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --blue --bold --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=$(CMAKE_PROGRESS_1) "Installing xfsr-run + implicit layer to ~/.local"
 	cd /home/jeff/Projects/crossvulkan && /home/jeff/Projects/crossvulkan/scripts/install-xfsr-run.sh
 

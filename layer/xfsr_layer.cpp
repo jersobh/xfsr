@@ -393,9 +393,8 @@ struct DeviceData {
     PFN_vkAcquireNextImageKHR AcquireNextImageKHR = nullptr;
     PFN_vkQueuePresentKHR QueuePresentKHR = nullptr;
     PFN_vkGetDeviceQueue GetDeviceQueue = nullptr;
-    PFN_vkDeviceWaitIdle DeviceWaitIdle = nullptr;
-    PFN_vkQueueWaitIdle QueueWaitIdle = nullptr;
     PFN_vkQueueSubmit QueueSubmit = nullptr;
+    PFN_vkQueueSubmit2 QueueSubmit2 = nullptr;
     PFN_vkCreateSemaphore CreateSemaphore = nullptr;
     PFN_vkDestroySemaphore DestroySemaphore = nullptr;
     PFN_vkCreateFence CreateFence = nullptr;
@@ -1565,7 +1564,7 @@ void applyCapsShrink(InstanceData* id, VkPhysicalDevice physicalDevice,
 
     const uint32_t cw = caps->currentExtent.width;
     const uint32_t ch = caps->currentExtent.height;
-    if (cw != 0xFFFFFFFFu && ch != 0xFFFFFFFFu && cw > 0 && ch > 0) {
+    if (!id->capsShrunk && cw != 0xFFFFFFFFu && ch != 0xFFFFFFFFu && cw > 0 && ch > 0) {
         id->realW = cw;
         id->realH = ch;
         id->realFromSurface = true;
@@ -1775,9 +1774,10 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateDevice(VkPhysicalDevice physicalDevice
     dd->AcquireNextImageKHR = getDevProc<PFN_vkAcquireNextImageKHR>(dd, "vkAcquireNextImageKHR");
     dd->QueuePresentKHR = getDevProc<PFN_vkQueuePresentKHR>(dd, "vkQueuePresentKHR");
     dd->GetDeviceQueue = getDevProc<PFN_vkGetDeviceQueue>(dd, "vkGetDeviceQueue");
-    dd->DeviceWaitIdle = getDevProc<PFN_vkDeviceWaitIdle>(dd, "vkDeviceWaitIdle");
-    dd->QueueWaitIdle = getDevProc<PFN_vkQueueWaitIdle>(dd, "vkQueueWaitIdle");
     dd->QueueSubmit = getDevProc<PFN_vkQueueSubmit>(dd, "vkQueueSubmit");
+    dd->QueueSubmit2 = getDevProc<PFN_vkQueueSubmit2>(dd, "vkQueueSubmit2");
+    if (!dd->QueueSubmit2)
+        dd->QueueSubmit2 = getDevProc<PFN_vkQueueSubmit2>(dd, "vkQueueSubmit2KHR");
     dd->CreateSemaphore = getDevProc<PFN_vkCreateSemaphore>(dd, "vkCreateSemaphore");
     dd->DestroySemaphore = getDevProc<PFN_vkDestroySemaphore>(dd, "vkDestroySemaphore");
     dd->CreateFence = getDevProc<PFN_vkCreateFence>(dd, "vkCreateFence");
@@ -1986,8 +1986,8 @@ bool displayExtentHint(InstanceData* id, uint32_t* outW, uint32_t* outH) {
 // Adopt app device into dd->dgpu so identity overlay can submit (no FSR proxy).
 bool ensureDgpuAdopted(DeviceData* dd) {
     if (!dd) return false;
-    if (dd->dgpuReady) return true;
     try {
+        dd->dgpu.deviceGdpa = dd->gdpa;
         dd->dgpu.adopt(dd->physical, dd->device, dd->graphicsFamily, dd->graphicsFamily);
         dd->dgpuReady = true;
         return true;
@@ -2083,6 +2083,53 @@ bool ensureOverlaySync(DeviceData* dd) {
     return true;
 }
 
+#ifndef VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_EXT
+#define VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_EXT static_cast<VkStructureType>(1000275001)
+#endif
+
+#ifndef VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_MODE_INFO_EXT
+#define VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_MODE_INFO_EXT static_cast<VkStructureType>(1000275003)
+#endif
+
+struct XfsrSwapchainPresentFenceInfoEXT {
+    VkStructureType sType;
+    const void* pNext;
+    uint32_t swapchainCount;
+    const VkFence* pFences;
+};
+
+// Global queue submit mutex to prevent concurrent QueueSubmit races on the same VkQueue
+// between VKD3D worker threads and XFSR present threads. Recursive to allow nested calls.
+static std::recursive_mutex g_queueSubmitMu;
+
+VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueueSubmit(VkQueue queue, uint32_t submitCount,
+                                                const VkSubmitInfo* pSubmits, VkFence fence) {
+    DeviceData* dd = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_mu);
+        if (!g_devices.empty()) dd = g_devices.begin()->second;
+    }
+    std::lock_guard<std::recursive_mutex> qlock(g_queueSubmitMu);
+    if (dd && dd->QueueSubmit) {
+        return dd->QueueSubmit(queue, submitCount, pSubmits, fence);
+    }
+    return VK_ERROR_INITIALIZATION_FAILED;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueueSubmit2(VkQueue queue, uint32_t submitCount,
+                                                 const VkSubmitInfo2* pSubmits, VkFence fence) {
+    DeviceData* dd = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_mu);
+        if (!g_devices.empty()) dd = g_devices.begin()->second;
+    }
+    std::lock_guard<std::recursive_mutex> qlock(g_queueSubmitMu);
+    if (dd && dd->QueueSubmit2) {
+        return dd->QueueSubmit2(queue, submitCount, pSubmits, fence);
+    }
+    return VK_ERROR_INITIALIZATION_FAILED;
+}
+
 // Identity present has no FSR proxy — still blit the F10/toast strip onto the WSI.
 // Returns true if this path presented (outPr set); false → caller should present normally.
 bool queuePresentWithOverlay(DeviceData* dd, VkQueue queue, const VkPresentInfoKHR* pPresentInfo,
@@ -2153,7 +2200,10 @@ bool queuePresentWithOverlay(DeviceData* dd, VkQueue queue, const VkPresentInfoK
         d.EndCommandBuffer(g_overlayCmd);
         // Leave fence signaled so the next attempt can proceed.
         VkSubmitInfo mark{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-        d.QueueSubmit(queue ? queue : dd->dgpu.graphicsQueue, 1, &mark, g_overlayFence);
+        {
+            std::lock_guard<std::recursive_mutex> qlock(g_queueSubmitMu);
+            d.QueueSubmit(queue ? queue : dd->dgpu.graphicsQueue, 1, &mark, g_overlayFence);
+        }
         return false;
     }
     transitionImage(&dd->dgpu, g_overlayCmd, pt.images[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -2174,7 +2224,10 @@ bool queuePresentWithOverlay(DeviceData* dd, VkQueue queue, const VkPresentInfoK
     si.pCommandBuffers = &g_overlayCmd;
     si.signalSemaphoreCount = 1;
     si.pSignalSemaphores = &g_overlayDoneSem;
-    if (d.QueueSubmit(submitQ, 1, &si, g_overlayFence) != VK_SUCCESS) return false;
+    {
+        std::lock_guard<std::recursive_mutex> qlock(g_queueSubmitMu);
+        if (d.QueueSubmit(submitQ, 1, &si, g_overlayFence) != VK_SUCCESS) return false;
+    }
 
     VkPresentInfoKHR pi = *pPresentInfo;
     pi.waitSemaphoreCount = 1;
@@ -2226,6 +2279,7 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSwapchainKHR(VkDevice device,
 
     if (!dd->dgpuReady) {
         try {
+            dd->dgpu.deviceGdpa = dd->gdpa;
             dd->dgpu.adopt(dd->physical, device, dd->graphicsFamily, dd->graphicsFamily);
             dd->dgpuReady = true;
         } catch (const std::exception& e) {
@@ -2297,9 +2351,8 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSwapchainKHR(VkDevice device,
             logv("[xfsr] in-game/caps proxy: render %ux%u → display %ux%u (scale %.2fx)\n", appW,
                  appH, surfW, surfH, dd->inst ? dd->inst->scale : 1.0f);
         }
-    } else if (!haveSurf && haveHint && (appW < hintW || appH < hintH)) {
-        // Wayland Zink/native: wl_egl_window shim or lower in-game res before concrete
-        // compositor extent — DISPLAY_EXTENT is the present size.
+    } else if (haveHint && (appW < hintW || appH < hintH) && (!haveSurf || surfW < hintW || surfH < hintH)) {
+        // Wayland Zink/native, or Windowed/borderless low-res where surface or app is smaller than the display
         ps->displayW = hintW;
         ps->displayH = hintH;
         ps->renderW = appW;
@@ -2312,7 +2365,7 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSwapchainKHR(VkDevice device,
                 dd->inst->scale = static_cast<float>(hintW) / static_cast<float>(appW);
             }
         }
-        logv("[xfsr] zink/wayland proxy: render %ux%u → display hint %ux%u (scale %.2fx)\n", appW,
+        logv("[xfsr] in-game/hint proxy: render %ux%u → display hint %ux%u (scale %.2fx)\n", appW,
              appH, hintW, hintH, dd->inst ? dd->inst->scale : 1.0f);
     } else if (forceScaleEnabled() && !zinkActive()) {
         // Full-window create (DXVK / apps that ignore caps): present at window size,
@@ -2444,6 +2497,8 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSwapchainKHR(VkDevice device,
             destroyProxy(oldPs);
         } else {
             oldPresent = oldApp; // passthrough handle
+            std::lock_guard<std::mutex> lock(g_mu);
+            g_passthrough.erase(keyOf(oldApp));
         }
     }
     (void)oldShadow;
@@ -2575,9 +2630,14 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_AcquireNextImageKHR(VkDevice device, VkSwapc
             // F4 applied in QueuePresent (holds g_proxyLife); don't clear here.
             // F1 preset: push scale then OUT_OF_DATE so the next create honors it.
             if (ctrl.recreateSwapchain) {
-                if (dd && dd->inst) dd->inst->scale = ctrl.scale;
-                xfsr_ctrl::clearRecreateRequest();
-                return VK_ERROR_OUT_OF_DATE_KHR;
+                if (capsShrinkEnabled()) {
+                    if (dd && dd->inst) dd->inst->scale = ctrl.scale;
+                    xfsr_ctrl::clearRecreateRequest();
+                    return VK_ERROR_OUT_OF_DATE_KHR;
+                } else {
+                    xfsr_ctrl::clearRecreateRequest();
+                    xfsr_ctrl::showToast("scale set by in-game resolution");
+                }
             }
         }
         // Fake acquire: pick next app image, but WAIT until the last present/FSR that
@@ -2607,6 +2667,7 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_AcquireNextImageKHR(VkDevice device, VkSwapc
                 if (dd->ResetFences && dd->QueueSubmit) {
                     dd->ResetFences(dd->device, 1, &imgFence);
                     VkSubmitInfo mark{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+                    std::lock_guard<std::recursive_mutex> qlock(g_queueSubmitMu);
                     dd->QueueSubmit(dd->graphicsQueue, 1, &mark, imgFence);
                 }
                 return VK_ERROR_OUT_OF_DATE_KHR;
@@ -2622,7 +2683,11 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_AcquireNextImageKHR(VkDevice device, VkSwapc
                 si.signalSemaphoreCount = 1;
                 si.pSignalSemaphores = &semaphore;
             }
-            VkResult sr = dd->QueueSubmit(dd->graphicsQueue, 1, &si, fence);
+            VkResult sr;
+            {
+                std::lock_guard<std::recursive_mutex> qlock(g_queueSubmitMu);
+                sr = dd->QueueSubmit(dd->graphicsQueue, 1, &si, fence);
+            }
             if (sr != VK_SUCCESS) return sr;
         }
         return VK_SUCCESS;
@@ -2808,6 +2873,30 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
         if (ps) dd = ps->dev;
     }
 
+    // VK_EXT_swapchain_maintenance1 present fences in pNext
+    std::vector<VkFence> appPresentFences;
+    for (const auto* h = reinterpret_cast<const VkBaseInStructure*>(pPresentInfo->pNext);
+         h != nullptr; h = h->pNext) {
+        if (h->sType == VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_EXT) {
+            auto* fi = reinterpret_cast<const XfsrSwapchainPresentFenceInfoEXT*>(h);
+            if (fi->pFences) {
+                for (uint32_t i = 0; i < fi->swapchainCount; ++i) {
+                    if (fi->pFences[i] != VK_NULL_HANDLE)
+                        appPresentFences.push_back(fi->pFences[i]);
+                }
+            }
+        }
+    }
+    if (!appPresentFences.empty()) {
+        static bool loggedAf = false;
+        if (!loggedAf) {
+            loggedAf = true;
+            std::fprintf(stderr,
+                         "[xfsr] handling %zu app present fence(s) from VK_EXT_swapchain_maintenance1\n",
+                         appPresentFences.size());
+        }
+    }
+
     // Hotkeys / control file even on identity (no proxy) so preset can take effect
     // on the next CreateSwapchain.
     xfsr_ctrl::Snapshot ctrl{};
@@ -2843,9 +2932,11 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
         if (ctrl.recreateSwapchain) {
             if (dd && dd->inst) dd->inst->scale = ctrl.scale;
             xfsr_ctrl::clearRecreateRequest();
-            if (ps && ps->pipelineReady) {
+            if (capsShrinkEnabled() && ps && ps->pipelineReady) {
                 life.unlock();
                 return VK_ERROR_OUT_OF_DATE_KHR;
+            } else if (!capsShrinkEnabled()) {
+                xfsr_ctrl::showToast("scale set by in-game resolution");
             }
         }
     }
@@ -3356,6 +3447,19 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
                             VK_ACCESS_TRANSFER_WRITE_BIT, 0);
         }
 
+        // Transition app image back to PRESENT_SRC_KHR so the application's layout tracker
+        // sees the image in PRESENT_SRC_KHR when next acquired (avoids layout barrier mismatch).
+        if (!presentsOnIgpu(ps) && !roundtripUpscaled) {
+            const VkImageLayout currentAppLayout =
+                (ps->useFsr || ps->useEdge || ps->useNis) ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                                                          : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            transitionImage(&presentCtx, cmd, frameImg->image, currentAppLayout,
+                            VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                            VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT, 0);
+        }
+
         vkCheck(pd.EndCommandBuffer(cmd), "end cmd");
 
         // Same-GPU: chain app present-wait semaphores into this submit (no host stall).
@@ -3391,30 +3495,40 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
         } else {
             vkCheck(dgpuVk.ResetFences(dd->dgpu.device, 1, &submitFence), "reset app img fence");
         }
-        vkCheck(pd.QueueSubmit(presentCtx.presentQueue ? presentCtx.presentQueue
-                                                       : presentCtx.graphicsQueue,
-                               1, &si, submitFence),
-                "submit");
-        ps->lastCmdFence[slot] = submitFence;
-        if (imgRelease && submitFence != imgRelease) {
-            // Present on another device: mark image free after a dGPU no-op wait for
-            // prior transfer work (round-trip / classic already finished the download).
-            vkCheck(dgpuVk.ResetFences(dd->dgpu.device, 1, &imgRelease), "reset app img mark");
-            VkSubmitInfo mark{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-            vkCheck(dgpuVk.QueueSubmit(dd->dgpu.graphicsQueue, 1, &mark, imgRelease),
-                    "signal app img release");
-            ps->lastCmdFence[slot] = imgRelease;
-        }
+        VkResult pr = VK_SUCCESS;
+        {
+            std::lock_guard<std::recursive_mutex> qlock(g_queueSubmitMu);
+            vkCheck(pd.QueueSubmit(presentCtx.presentQueue ? presentCtx.presentQueue
+                                                           : presentCtx.graphicsQueue,
+                                   1, &si, submitFence),
+                    "submit");
+            ps->lastCmdFence[slot] = submitFence;
+            if (imgRelease && submitFence != imgRelease) {
+                // Present on another device: mark image free after a dGPU no-op wait for
+                // prior transfer work (round-trip / classic already finished the download).
+                vkCheck(dgpuVk.ResetFences(dd->dgpu.device, 1, &imgRelease), "reset app img mark");
+                VkSubmitInfo mark{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+                vkCheck(dgpuVk.QueueSubmit(dd->dgpu.graphicsQueue, 1, &mark, imgRelease),
+                        "signal app img release");
+                ps->lastCmdFence[slot] = imgRelease;
+            }
+            for (VkFence af : appPresentFences) {
+                dgpuVk.ResetFences(dd->dgpu.device, 1, &af);
+                VkSubmitInfo mark{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+                vkCheck(dgpuVk.QueueSubmit(dd->dgpu.graphicsQueue, 1, &mark, af),
+                        "signal app present fence");
+            }
 
-        VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
-        pi.waitSemaphoreCount = 1;
-        pi.pWaitSemaphores = &doneSem;
-        pi.swapchainCount = 1;
-        pi.pSwapchains = &ps->realSwapchain;
-        pi.pImageIndices = &realIdx;
-        VkQueue presentQ =
-            presentCtx.presentQueue ? presentCtx.presentQueue : presentCtx.graphicsQueue;
-        VkResult pr = wsi.QueuePresentKHR(presentQ, &pi);
+            VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
+            pi.waitSemaphoreCount = 1;
+            pi.pWaitSemaphores = &doneSem;
+            pi.swapchainCount = 1;
+            pi.pSwapchains = &ps->realSwapchain;
+            pi.pImageIndices = &realIdx;
+            VkQueue presentQ =
+                presentCtx.presentQueue ? presentCtx.presentQueue : presentCtx.graphicsQueue;
+            pr = wsi.QueuePresentKHR(presentQ, &pi);
+        }
         if (pr != VK_SUCCESS && pr != VK_SUBOPTIMAL_KHR && pr != VK_ERROR_OUT_OF_DATE_KHR) {
             std::fprintf(stderr, "[xfsr] QueuePresent failed: %d\n", static_cast<int>(pr));
             if (presentsOnIgpu(ps) && !dd->forceRoundTripOffload) {
@@ -3564,6 +3678,11 @@ PFN_vkVoidFunction resolveDevice(const char* pName) {
         return reinterpret_cast<PFN_vkVoidFunction>(xfsr_SetHdrMetadataEXT);
     if (std::strcmp(pName, "vkQueuePresentKHR") == 0)
         return reinterpret_cast<PFN_vkVoidFunction>(xfsr_QueuePresentKHR);
+    if (std::strcmp(pName, "vkQueueSubmit") == 0)
+        return reinterpret_cast<PFN_vkVoidFunction>(xfsr_QueueSubmit);
+    if (std::strcmp(pName, "vkQueueSubmit2") == 0 ||
+        std::strcmp(pName, "vkQueueSubmit2KHR") == 0)
+        return reinterpret_cast<PFN_vkVoidFunction>(xfsr_QueueSubmit2);
     if (std::strcmp(pName, "vkGetSwapchainCounterEXT") == 0)
         return reinterpret_cast<PFN_vkVoidFunction>(xfsr_GetSwapchainCounterEXT);
     if (std::strcmp(pName, "vkGetPastPresentationTimingGOOGLE") == 0)

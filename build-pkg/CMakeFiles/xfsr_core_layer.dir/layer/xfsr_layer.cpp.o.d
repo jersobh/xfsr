@@ -164,6 +164,10 @@ CMakeFiles/xfsr_core_layer.dir/layer/xfsr_layer.cpp.o: \
  /home/jeff/Projects/crossvulkan/src/frame_transfer.hpp \
  /home/jeff/Projects/crossvulkan/src/gpu_image.hpp \
  /home/jeff/Projects/crossvulkan/src/fsr_pass.hpp \
+ /home/jeff/Projects/crossvulkan/src/nis_pass.hpp \
+ /home/jeff/Projects/crossvulkan/src/edge_pass.hpp \
+ /home/jeff/Projects/crossvulkan/src/offload_roundtrip.hpp \
+ /home/jeff/Projects/crossvulkan/layer/xfsr_controls.hpp \
  /usr/include/c++/16/atomic /usr/include/c++/16/bits/atomic_base.h \
  /usr/include/c++/16/bits/atomic_lockfree_defines.h \
  /usr/include/c++/16/cstdarg /usr/include/c++/16/mutex \
@@ -192,4 +196,5 @@ CMakeFiles/xfsr_core_layer.dir/layer/xfsr_layer.cpp.o: \
  /usr/include/c++/16/bits/hashtable_policy.h \
  /usr/include/c++/16/ext/aligned_buffer.h \
  /usr/include/c++/16/bits/enable_special_members.h \
- /usr/include/c++/16/bits/node_handle.h
+ /usr/include/c++/16/bits/node_handle.h /usr/include/c++/16/unordered_set \
+ /usr/include/c++/16/bits/unordered_set.h

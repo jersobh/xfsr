@@ -9,11 +9,15 @@ set(CMAKE_DEPENDS_LANGUAGES
 # The set of dependency files which are needed:
 set(CMAKE_DEPENDS_DEPENDENCY_FILES
   "/home/jeff/Projects/crossvulkan/build-pkg/_deps/volk-src/volk.c" "CMakeFiles/xfsr_core_layer.dir/_deps/volk-src/volk.c.o" "gcc" "CMakeFiles/xfsr_core_layer.dir/_deps/volk-src/volk.c.o.d"
+  "/home/jeff/Projects/crossvulkan/layer/xfsr_controls.cpp" "CMakeFiles/xfsr_core_layer.dir/layer/xfsr_controls.cpp.o" "gcc" "CMakeFiles/xfsr_core_layer.dir/layer/xfsr_controls.cpp.o.d"
   "/home/jeff/Projects/crossvulkan/layer/xfsr_layer.cpp" "CMakeFiles/xfsr_core_layer.dir/layer/xfsr_layer.cpp.o" "gcc" "CMakeFiles/xfsr_core_layer.dir/layer/xfsr_layer.cpp.o.d"
   "/home/jeff/Projects/crossvulkan/src/dual_devices.cpp" "CMakeFiles/xfsr_core_layer.dir/src/dual_devices.cpp.o" "gcc" "CMakeFiles/xfsr_core_layer.dir/src/dual_devices.cpp.o.d"
+  "/home/jeff/Projects/crossvulkan/src/edge_pass.cpp" "CMakeFiles/xfsr_core_layer.dir/src/edge_pass.cpp.o" "gcc" "CMakeFiles/xfsr_core_layer.dir/src/edge_pass.cpp.o.d"
   "/home/jeff/Projects/crossvulkan/src/frame_transfer.cpp" "CMakeFiles/xfsr_core_layer.dir/src/frame_transfer.cpp.o" "gcc" "CMakeFiles/xfsr_core_layer.dir/src/frame_transfer.cpp.o.d"
   "/home/jeff/Projects/crossvulkan/src/fsr_pass.cpp" "CMakeFiles/xfsr_core_layer.dir/src/fsr_pass.cpp.o" "gcc" "CMakeFiles/xfsr_core_layer.dir/src/fsr_pass.cpp.o.d"
   "/home/jeff/Projects/crossvulkan/src/gpu_image.cpp" "CMakeFiles/xfsr_core_layer.dir/src/gpu_image.cpp.o" "gcc" "CMakeFiles/xfsr_core_layer.dir/src/gpu_image.cpp.o.d"
+  "/home/jeff/Projects/crossvulkan/src/nis_pass.cpp" "CMakeFiles/xfsr_core_layer.dir/src/nis_pass.cpp.o" "gcc" "CMakeFiles/xfsr_core_layer.dir/src/nis_pass.cpp.o.d"
+  "/home/jeff/Projects/crossvulkan/src/offload_roundtrip.cpp" "CMakeFiles/xfsr_core_layer.dir/src/offload_roundtrip.cpp.o" "gcc" "CMakeFiles/xfsr_core_layer.dir/src/offload_roundtrip.cpp.o.d"
   "/home/jeff/Projects/crossvulkan/src/present.cpp" "CMakeFiles/xfsr_core_layer.dir/src/present.cpp.o" "gcc" "CMakeFiles/xfsr_core_layer.dir/src/present.cpp.o.d"
   )
 

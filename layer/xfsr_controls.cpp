@@ -157,7 +157,7 @@ struct Runtime {
     bool rcas = true;
     Upscaler upscaler = Upscaler::Fsr1;
     float edgeSharpness = 0.45f;
-    bool edgePerf = false;
+    bool edgePerf = true;
     bool offload = false;
     bool oneWay = true;
     bool oneWayForce = false;

@@ -76,6 +76,8 @@ CMakeFiles/shaders: shaders/fsr_easu_fp16.comp.spv
 CMakeFiles/shaders: shaders/fsr_rcas_fp16.comp.spv
 CMakeFiles/shaders: shaders/fsr_easu.comp.spv
 CMakeFiles/shaders: shaders/fsr_rcas.comp.spv
+CMakeFiles/shaders: shaders/nis_pass.comp.spv
+CMakeFiles/shaders: shaders/edge_pass.comp.spv
 
 shaders/blit.frag.spv: /home/jeff/Projects/crossvulkan/shaders/blit.frag.glsl
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --blue --bold --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=$(CMAKE_PROGRESS_1) "Compiling blit.frag.glsl"
@@ -85,9 +87,13 @@ shaders/blit.vert.spv: /home/jeff/Projects/crossvulkan/shaders/blit.vert.glsl
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --blue --bold --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=$(CMAKE_PROGRESS_2) "Compiling blit.vert.glsl"
 	/usr/bin/glslc -O -fshader-stage=vertex -o /home/jeff/Projects/crossvulkan/build-pkg/shaders/blit.vert.spv /home/jeff/Projects/crossvulkan/shaders/blit.vert.glsl
 
+shaders/edge_pass.comp.spv: /home/jeff/Projects/crossvulkan/shaders/edge_pass.comp.glsl
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --blue --bold --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=$(CMAKE_PROGRESS_3) "Compiling edge_pass.comp.spv"
+	/usr/bin/glslc -O -fshader-stage=compute -o /home/jeff/Projects/crossvulkan/build-pkg/shaders/edge_pass.comp.spv /home/jeff/Projects/crossvulkan/shaders/edge_pass.comp.glsl
+
 shaders/fsr_easu.comp.spv: shaders/fsr_easu_fp32.comp.spv
 shaders/fsr_easu.comp.spv: shaders/fsr_rcas_fp32.comp.spv
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --blue --bold --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=$(CMAKE_PROGRESS_3) "Aliasing fsr_* to fp32"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --blue --bold --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=$(CMAKE_PROGRESS_4) "Aliasing fsr_* to fp32"
 	/usr/bin/cmake -E copy /home/jeff/Projects/crossvulkan/build-pkg/shaders/fsr_easu_fp32.comp.spv /home/jeff/Projects/crossvulkan/build-pkg/shaders/fsr_easu.comp.spv
 	/usr/bin/cmake -E copy /home/jeff/Projects/crossvulkan/build-pkg/shaders/fsr_rcas_fp32.comp.spv /home/jeff/Projects/crossvulkan/build-pkg/shaders/fsr_rcas.comp.spv
 
@@ -97,33 +103,37 @@ shaders/fsr_rcas.comp.spv: shaders/fsr_easu.comp.spv
 shaders/fsr_easu_fp16.comp.spv: /home/jeff/Projects/crossvulkan/shaders/fsr_pass.comp.glsl
 shaders/fsr_easu_fp16.comp.spv: /home/jeff/Projects/crossvulkan/third_party/ffx-fsr/ffx_fsr1.h
 shaders/fsr_easu_fp16.comp.spv: /home/jeff/Projects/crossvulkan/third_party/ffx-fsr/ffx_a.h
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --blue --bold --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=$(CMAKE_PROGRESS_4) "Compiling fsr_easu_fp16.comp.spv"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --blue --bold --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=$(CMAKE_PROGRESS_5) "Compiling fsr_easu_fp16.comp.spv"
 	/usr/bin/glslc -O -fshader-stage=compute -DSAMPLE_EASU=1 -DSAMPLE_SLOW_FALLBACK=0 -I/home/jeff/Projects/crossvulkan/third_party/ffx-fsr -o /home/jeff/Projects/crossvulkan/build-pkg/shaders/fsr_easu_fp16.comp.spv /home/jeff/Projects/crossvulkan/shaders/fsr_pass.comp.glsl
 
 shaders/fsr_easu_fp32.comp.spv: /home/jeff/Projects/crossvulkan/shaders/fsr_pass.comp.glsl
 shaders/fsr_easu_fp32.comp.spv: /home/jeff/Projects/crossvulkan/third_party/ffx-fsr/ffx_fsr1.h
 shaders/fsr_easu_fp32.comp.spv: /home/jeff/Projects/crossvulkan/third_party/ffx-fsr/ffx_a.h
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --blue --bold --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=$(CMAKE_PROGRESS_5) "Compiling fsr_easu_fp32.comp.spv"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --blue --bold --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=$(CMAKE_PROGRESS_6) "Compiling fsr_easu_fp32.comp.spv"
 	/usr/bin/glslc -O -fshader-stage=compute -DSAMPLE_EASU=1 -DSAMPLE_SLOW_FALLBACK=1 -I/home/jeff/Projects/crossvulkan/third_party/ffx-fsr -o /home/jeff/Projects/crossvulkan/build-pkg/shaders/fsr_easu_fp32.comp.spv /home/jeff/Projects/crossvulkan/shaders/fsr_pass.comp.glsl
 
 shaders/fsr_rcas_fp16.comp.spv: /home/jeff/Projects/crossvulkan/shaders/fsr_pass.comp.glsl
 shaders/fsr_rcas_fp16.comp.spv: /home/jeff/Projects/crossvulkan/third_party/ffx-fsr/ffx_fsr1.h
 shaders/fsr_rcas_fp16.comp.spv: /home/jeff/Projects/crossvulkan/third_party/ffx-fsr/ffx_a.h
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --blue --bold --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=$(CMAKE_PROGRESS_6) "Compiling fsr_rcas_fp16.comp.spv"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --blue --bold --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=$(CMAKE_PROGRESS_7) "Compiling fsr_rcas_fp16.comp.spv"
 	/usr/bin/glslc -O -fshader-stage=compute -DSAMPLE_RCAS=1 -DSAMPLE_SLOW_FALLBACK=0 -I/home/jeff/Projects/crossvulkan/third_party/ffx-fsr -o /home/jeff/Projects/crossvulkan/build-pkg/shaders/fsr_rcas_fp16.comp.spv /home/jeff/Projects/crossvulkan/shaders/fsr_pass.comp.glsl
 
 shaders/fsr_rcas_fp32.comp.spv: /home/jeff/Projects/crossvulkan/shaders/fsr_pass.comp.glsl
 shaders/fsr_rcas_fp32.comp.spv: /home/jeff/Projects/crossvulkan/third_party/ffx-fsr/ffx_fsr1.h
 shaders/fsr_rcas_fp32.comp.spv: /home/jeff/Projects/crossvulkan/third_party/ffx-fsr/ffx_a.h
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --blue --bold --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=$(CMAKE_PROGRESS_7) "Compiling fsr_rcas_fp32.comp.spv"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --blue --bold --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=$(CMAKE_PROGRESS_8) "Compiling fsr_rcas_fp32.comp.spv"
 	/usr/bin/glslc -O -fshader-stage=compute -DSAMPLE_RCAS=1 -DSAMPLE_SLOW_FALLBACK=1 -I/home/jeff/Projects/crossvulkan/third_party/ffx-fsr -o /home/jeff/Projects/crossvulkan/build-pkg/shaders/fsr_rcas_fp32.comp.spv /home/jeff/Projects/crossvulkan/shaders/fsr_pass.comp.glsl
 
+shaders/nis_pass.comp.spv: /home/jeff/Projects/crossvulkan/shaders/nis_pass.comp.glsl
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --blue --bold --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=$(CMAKE_PROGRESS_9) "Compiling nis_pass.comp.spv"
+	/usr/bin/glslc -O -fshader-stage=compute -o /home/jeff/Projects/crossvulkan/build-pkg/shaders/nis_pass.comp.spv /home/jeff/Projects/crossvulkan/shaders/nis_pass.comp.glsl
+
 shaders/scene.frag.spv: /home/jeff/Projects/crossvulkan/shaders/scene.frag.glsl
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --blue --bold --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=$(CMAKE_PROGRESS_8) "Compiling scene.frag.glsl"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --blue --bold --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=$(CMAKE_PROGRESS_10) "Compiling scene.frag.glsl"
 	/usr/bin/glslc -O -fshader-stage=fragment -o /home/jeff/Projects/crossvulkan/build-pkg/shaders/scene.frag.spv /home/jeff/Projects/crossvulkan/shaders/scene.frag.glsl
 
 shaders/scene.vert.spv: /home/jeff/Projects/crossvulkan/shaders/scene.vert.glsl
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --blue --bold --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=$(CMAKE_PROGRESS_9) "Compiling scene.vert.glsl"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --blue --bold --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=$(CMAKE_PROGRESS_11) "Compiling scene.vert.glsl"
 	/usr/bin/glslc -O -fshader-stage=vertex -o /home/jeff/Projects/crossvulkan/build-pkg/shaders/scene.vert.spv /home/jeff/Projects/crossvulkan/shaders/scene.vert.glsl
 
 CMakeFiles/shaders.dir/codegen:
@@ -132,12 +142,14 @@ CMakeFiles/shaders.dir/codegen:
 shaders: CMakeFiles/shaders
 shaders: shaders/blit.frag.spv
 shaders: shaders/blit.vert.spv
+shaders: shaders/edge_pass.comp.spv
 shaders: shaders/fsr_easu.comp.spv
 shaders: shaders/fsr_easu_fp16.comp.spv
 shaders: shaders/fsr_easu_fp32.comp.spv
 shaders: shaders/fsr_rcas.comp.spv
 shaders: shaders/fsr_rcas_fp16.comp.spv
 shaders: shaders/fsr_rcas_fp32.comp.spv
+shaders: shaders/nis_pass.comp.spv
 shaders: shaders/scene.frag.spv
 shaders: shaders/scene.vert.spv
 shaders: CMakeFiles/shaders.dir/build.make

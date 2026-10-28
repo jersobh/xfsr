@@ -5,10 +5,14 @@ libVkLayer_XFSR.so: \
   CMakeFiles/xfsr_core_layer.dir/src/dual_devices.cpp.o \
   CMakeFiles/xfsr_core_layer.dir/src/frame_transfer.cpp.o \
   CMakeFiles/xfsr_core_layer.dir/src/fsr_pass.cpp.o \
+  CMakeFiles/xfsr_core_layer.dir/src/nis_pass.cpp.o \
+  CMakeFiles/xfsr_core_layer.dir/src/edge_pass.cpp.o \
   CMakeFiles/xfsr_core_layer.dir/src/gpu_image.cpp.o \
+  CMakeFiles/xfsr_core_layer.dir/src/offload_roundtrip.cpp.o \
   CMakeFiles/xfsr_core_layer.dir/src/present.cpp.o \
   CMakeFiles/xfsr_core_layer.dir/_deps/volk-src/volk.c.o \
   CMakeFiles/xfsr_core_layer.dir/layer/xfsr_layer.cpp.o \
+  CMakeFiles/xfsr_core_layer.dir/layer/xfsr_controls.cpp.o \
   /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/libdl.a \
   /usr/lib/gcc/x86_64-pc-linux-gnu/16/libstdc++.so \
   /usr/lib/gcc/x86_64-pc-linux-gnu/16/libstdc++.so \
@@ -52,13 +56,21 @@ CMakeFiles/xfsr_core_layer.dir/src/frame_transfer.cpp.o:
 
 CMakeFiles/xfsr_core_layer.dir/src/fsr_pass.cpp.o:
 
+CMakeFiles/xfsr_core_layer.dir/src/nis_pass.cpp.o:
+
+CMakeFiles/xfsr_core_layer.dir/src/edge_pass.cpp.o:
+
 CMakeFiles/xfsr_core_layer.dir/src/gpu_image.cpp.o:
+
+CMakeFiles/xfsr_core_layer.dir/src/offload_roundtrip.cpp.o:
 
 CMakeFiles/xfsr_core_layer.dir/src/present.cpp.o:
 
 CMakeFiles/xfsr_core_layer.dir/_deps/volk-src/volk.c.o:
 
 CMakeFiles/xfsr_core_layer.dir/layer/xfsr_layer.cpp.o:
+
+CMakeFiles/xfsr_core_layer.dir/layer/xfsr_controls.cpp.o:
 
 /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/libdl.a:
 

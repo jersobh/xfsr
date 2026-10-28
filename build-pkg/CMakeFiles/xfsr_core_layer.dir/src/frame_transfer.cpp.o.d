@@ -162,4 +162,8 @@ CMakeFiles/xfsr_core_layer.dir/src/frame_transfer.cpp.o: \
  /usr/include/c++/16/tr1/riemann_zeta.tcc \
  /home/jeff/Projects/crossvulkan/src/device_dispatch.hpp \
  /home/jeff/Projects/crossvulkan/build-pkg/_deps/vulkan_headers-src/include/vulkan/vk_layer.h \
- /home/jeff/Projects/crossvulkan/src/gpu_image.hpp
+ /home/jeff/Projects/crossvulkan/src/gpu_image.hpp /usr/include/unistd.h \
+ /usr/include/bits/posix_opt.h /usr/include/bits/environments.h \
+ /usr/include/bits/confname.h /usr/include/bits/getopt_posix.h \
+ /usr/include/bits/getopt_core.h /usr/include/bits/unistd_ext.h \
+ /usr/include/linux/close_range.h

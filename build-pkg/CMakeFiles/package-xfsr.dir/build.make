@@ -67,6 +67,7 @@ include CMakeFiles/package-xfsr.dir/compiler_depend.make
 include CMakeFiles/package-xfsr.dir/progress.make
 
 CMakeFiles/package-xfsr: libVkLayer_XFSR.so
+CMakeFiles/package-xfsr: libxfsr_gl_shim.so
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --blue --bold --progress-dir=/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles --progress-num=$(CMAKE_PROGRESS_1) "Packaging xfsr-run release tarball into dist/"
 	cd /home/jeff/Projects/crossvulkan && /home/jeff/Projects/crossvulkan/scripts/package-xfsr.sh
 

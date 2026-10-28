@@ -7,8 +7,15 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Presentation Deadlock**: Upgraded `g_queueSubmitMu` to `std::recursive_mutex` in [xfsr_layer.cpp](file:///home/jeff/Projects/crossvulkan/layer/xfsr_layer.cpp), eliminating a self-deadlock when `pd.QueueSubmit` invokes `xfsr_QueueSubmit` from the present thread.
+- **In-Game Resolution Proxy Preservation**: Guarded swapchain recreation on `F1` preset changes with `capsShrinkEnabled()`; titles using in-game resolution scaling (`caps_shrink=0`, e.g. Resident Evil Village) no longer get forced into `VK_ERROR_OUT_OF_DATE_KHR`, preventing accidental fallback to identity passthrough mode.
+- **Direct dGPU Dispatch**: Bound `deviceGdpa` directly to the adopted dGPU context in `ensureDgpuAdopted` and `xfsr_CreateSwapchainKHR`, avoiding recursive layer interceptors and optimizing `vkQueueSubmit2` dispatch.
+
 ### Changed
 
+- Native layer upscaling for Resident Evil Village (`app:1196590`): enabled direct Vulkan layer proxy with `edge` upscaler, `caps_shrink=0`, and overlay support. Live switching between Edge, FSR1, NIS, and Blit now works seamlessly via hotkeys.
 - NVIDIA: do **not** auto-skip gamescope when `--any` / `--gamescope` / profile
   `gamescope=1` is set (Village/CS2 need the nest; layer stays identity). Opt out
   with `XFSR_GAMESCOPE_FORCE=0`. Village profile: `gamescope=1` + `gamescope_fs=1`

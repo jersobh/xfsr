@@ -29,19 +29,15 @@ shared vec3 smTensor[SRC_DIM * SRC_DIM]; // xyz = (Jxx, Jxy, Jyy) Di Zenzo
 shared vec3 smUp[UP_DIM * UP_DIM];
 
 float lumaLin(vec3 c) {
-    vec3 x = max(c, vec3(0.0));
-    vec3 lin = mix(x / 12.92, pow((x + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), x));
-    return dot(lin, LUMA);
+    return dot(c * c, LUMA);
 }
 
 vec3 toLin(vec3 c) {
-    vec3 x = max(c, vec3(0.0));
-    return mix(x / 12.92, pow((x + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), x));
+    return c * c;
 }
 
 vec3 toSrgb(vec3 lin) {
-    vec3 x = max(lin, vec3(0.0));
-    return mix(x * 12.92, 1.055 * pow(x, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), x));
+    return sqrt(max(lin, vec3(0.0)));
 }
 
 vec3 sampleSrc(vec2 uv) {
@@ -122,19 +118,15 @@ vec3 diZenzoAt(ivec2 c) {
     return vec3(dot(gx, gx), dot(gx, gy), dot(gy, gy));
 }
 
-// 3×3 box-smooth of the structure tensor (smooth J, not squared blurred grads).
+// Di Zenzo RGB structure tensor at one shared-tile texel (Sobel per channel, sum outer products).
+// Uses fast gamma-space linear approximation (c*c) on the ALU instead of heavy transcendentals.
 void fillAndSmoothTensor() {
     int lid = int(gl_LocalInvocationIndex);
     int total = SRC_DIM * SRC_DIM;
     for (int i = lid; i < total; i += 256) {
         int sx = i % SRC_DIM;
         int sy = i / SRC_DIM;
-        ivec2 c = ivec2(sx, sy);
-        vec3 acc = vec3(0.0);
-        for (int y = -1; y <= 1; ++y)
-            for (int x = -1; x <= 1; ++x)
-                acc += diZenzoAt(c + ivec2(x, y));
-        smTensor[i] = acc * (1.0 / 9.0);
+        smTensor[i] = diZenzoAt(ivec2(sx, sy));
     }
     barrier();
 }

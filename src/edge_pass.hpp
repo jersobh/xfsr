@@ -25,7 +25,7 @@ struct EdgePass {
     uint32_t displayW = 0;
     uint32_t displayH = 0;
     float sharpness = 0.45f; // 0..1 — overridable live / XFSR_EDGE_SHARPNESS
-    bool perfMode = false;   // XFSR_EDGE_MODE=perf|lite → cheaper path
+    bool perfMode = true;    // default perf (fastest spatial upscaler); XFSR_EDGE_MODE=quality for heavy path
     bool swizzleBgra = false;
     VkFormat outputFormat = VK_FORMAT_R8G8B8A8_UNORM;
 
