@@ -186,18 +186,28 @@ int main(int argc, char** argv) {
     int complexity = 64;
     int winW = 1920, winH = 1080;
     bool fullscreen = false;
+    int customScW = 0, customScH = 0;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--seconds" && i + 1 < argc) seconds = std::atoi(argv[++i]);
         else if (a == "--complexity" && i + 1 < argc) complexity = std::atoi(argv[++i]);
         else if (a == "--width" && i + 1 < argc) winW = std::atoi(argv[++i]);
         else if (a == "--height" && i + 1 < argc) winH = std::atoi(argv[++i]);
+        else if ((a == "--swapchain" || a == "--swapchain-extent") && i + 1 < argc) {
+            std::string s = argv[++i];
+            size_t x = s.find('x');
+            if (x == std::string::npos) x = s.find('X');
+            if (x != std::string::npos) {
+                customScW = std::atoi(s.substr(0, x).c_str());
+                customScH = std::atoi(s.substr(x + 1).c_str());
+            }
+        }
         else if (a == "--fullscreen" || a == "-f") fullscreen = true;
         else if (a == "--windowed") fullscreen = false;
         else if (a == "-h" || a == "--help") {
             std::printf(
                 "Usage: xfsr_load_vk [--seconds N] [--complexity N] [--width W] [--height H]\n"
-                "                    [--fullscreen|--windowed]\n"
+                "                    [--swapchain WxH] [--fullscreen|--windowed]\n"
                 "  Default: run until Ctrl+C, Esc, or window close.\n"
                 "  --seconds N  timed run (used by --check / auto-tune).\n");
             return 0;
@@ -325,6 +335,9 @@ int main(int argc, char** argv) {
     }
 
     auto pickExtent = [&](const VkSurfaceCapabilitiesKHR& c) {
+        if (customScW > 0 && customScH > 0) {
+            return VkExtent2D{static_cast<uint32_t>(customScW), static_cast<uint32_t>(customScH)};
+        }
         VkExtent2D e = c.currentExtent;
         if (e.width == 0xFFFFFFFFu) {
             e.width = std::clamp(static_cast<uint32_t>(winW), c.minImageExtent.width,

@@ -617,6 +617,10 @@ VkSwapchainKHR makeOpaqueSwapchainHandle() {
     return reinterpret_cast<VkSwapchainKHR>((id << 4) | 0x1ull);
 }
 
+inline bool isOpaqueSwapchainHandle(VkSwapchainKHR s) {
+    return (reinterpret_cast<uintptr_t>(s) & 0x1ull) != 0;
+}
+
 void waitOffloadIdle(DeviceData* dd) {
     if (!dd) return;
     auto waitCtx = [](DeviceContext& ctx) {
@@ -2276,33 +2280,26 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSwapchainKHR(VkDevice device,
         surfH = dd->inst->realH;
         haveSurf = true;
     }
-    // Caps-honored only when app extent ≈ expected render size for this scale.
-    // glmark2's default 800x600 window is NOT ultra's 768x432 render of 1080p.
-    auto looksLikeRenderSize = [&](uint32_t aw, uint32_t ah, uint32_t dw, uint32_t dh) {
-        uint32_t rw = 0, rh = 0;
-        computeRenderSize(dw, dh, scale, &rw, &rh);
-        const int tol = 16;
-        return std::abs(static_cast<int>(aw) - static_cast<int>(rw)) <= tol &&
-               std::abs(static_cast<int>(ah) - static_cast<int>(rh)) <= tol;
-    };
-    if (haveSurf && (appW < surfW || appH < surfH) &&
-        looksLikeRenderSize(appW, appH, surfW, surfH)) {
-        // App honored caps shrink (native VK or Zink+shim) — present at true window.
+    if (haveSurf && (appW < surfW || appH < surfH)) {
+        // App requested a swapchain smaller than the window/surface (e.g. in-game
+        // resolution 950x600 or caps-honored shrink) — upscale to true window extent.
         ps->displayW = surfW;
         ps->displayH = surfH;
         ps->renderW = appW;
         ps->renderH = appH;
+        if (dd->inst && appW > 0) {
+            dd->inst->scale = static_cast<float>(surfW) / static_cast<float>(appW);
+        }
         if (zinkActive()) {
             logv("[xfsr] zink proxy: render %ux%u → display %ux%u (needs libxfsr_gl_shim)\n", appW,
                  appH, surfW, surfH);
         } else {
-            logv("[xfsr] caps-honored proxy: render %ux%u → display %ux%u\n", appW, appH, surfW,
-                 surfH);
+            logv("[xfsr] in-game/caps proxy: render %ux%u → display %ux%u (scale %.2fx)\n", appW,
+                 appH, surfW, surfH, dd->inst ? dd->inst->scale : 1.0f);
         }
-    } else if (!haveSurf && haveHint && (appW < hintW || appH < hintH) &&
-               looksLikeRenderSize(appW, appH, hintW, hintH)) {
-        // Wayland Zink: wl_egl_window shim (or caps max clamp) created at render size
-        // before any concrete compositor extent — DISPLAY_EXTENT is the present size.
+    } else if (!haveSurf && haveHint && (appW < hintW || appH < hintH)) {
+        // Wayland Zink/native: wl_egl_window shim or lower in-game res before concrete
+        // compositor extent — DISPLAY_EXTENT is the present size.
         ps->displayW = hintW;
         ps->displayH = hintH;
         ps->renderW = appW;
@@ -2311,32 +2308,12 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSwapchainKHR(VkDevice device,
             dd->inst->realW = hintW;
             dd->inst->realH = hintH;
             dd->inst->realFromSurface = true;
+            if (appW > 0) {
+                dd->inst->scale = static_cast<float>(hintW) / static_cast<float>(appW);
+            }
         }
-        logv("[xfsr] zink/wayland proxy: render %ux%u → display hint %ux%u\n", appW, appH, hintW,
-             hintH);
-    } else if (haveSurf && (appW < surfW || appH < surfH) &&
-               !looksLikeRenderSize(appW, appH, surfW, surfH)) {
-        // Smaller than surface but not our render size → real windowed app (e.g. glmark2
-        // 800x600 on a 1080p output). Present at the app/window size, not the output.
-        ps->displayW = appW;
-        ps->displayH = appH;
-        ps->renderW = appW;
-        ps->renderH = appH;
-        uint32_t rw = 0, rh = 0;
-        computeRenderSize(appW, appH, scale, &rw, &rh);
-        if (zinkActive() && (rw < appW || rh < appH)) {
-            // Caps-shrink should make the next recreate match; for this create keep
-            // images == app FB. Identity until Zink re-queries shrunk caps.
-            logv("[xfsr] zink windowed %ux%u (surf %ux%u was not render-sized) — wait caps-shrink\n",
-                 appW, appH, surfW, surfH);
-        } else {
-            logv("[xfsr] windowed app %ux%u (ignore surf/hint %ux%u)\n", appW, appH, surfW, surfH);
-        }
-        if (dd->inst) {
-            dd->inst->realW = appW;
-            dd->inst->realH = appH;
-            dd->inst->realFromSurface = true;
-        }
+        logv("[xfsr] zink/wayland proxy: render %ux%u → display hint %ux%u (scale %.2fx)\n", appW,
+             appH, hintW, hintH, dd->inst ? dd->inst->scale : 1.0f);
     } else if (forceScaleEnabled() && !zinkActive()) {
         // Full-window create (DXVK / apps that ignore caps): present at window size,
         // render at preset. On Wayland without a concrete extent, only trust the
@@ -2546,6 +2523,7 @@ VKAPI_ATTR void VKAPI_CALL xfsr_DestroySwapchainKHR(VkDevice device, VkSwapchain
         std::lock_guard<std::mutex> lock(g_mu);
         g_passthrough.erase(keyOf(swapchain));
     }
+    if (isOpaqueSwapchainHandle(swapchain)) return;
     if (dd) dd->DestroySwapchainKHR(device, swapchain, pAllocator);
 }
 
@@ -2683,6 +2661,7 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_GetSwapchainStatusKHR(VkDevice device,
         if (dit != g_devices.end()) dd = dit->second;
     }
     if (ps && ps->pipelineReady) return VK_SUCCESS;
+    if (isOpaqueSwapchainHandle(swapchain)) return VK_SUCCESS;
     if (!dd || !dd->gdpa) return VK_ERROR_INITIALIZATION_FAILED;
     auto fn = reinterpret_cast<PFN_vkGetSwapchainStatusKHR>(
         dd->gdpa(device, "vkGetSwapchainStatusKHR"));
@@ -2701,7 +2680,7 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_WaitForPresentKHR(VkDevice device, VkSwapcha
         auto dit = g_devices.find(keyOf(device));
         if (dit != g_devices.end()) dd = dit->second;
     }
-    if (isProxy) return VK_SUCCESS;
+    if (isProxy || isOpaqueSwapchainHandle(swapchain)) return VK_SUCCESS;
     if (!dd || !dd->gdpa) return VK_SUCCESS;
     auto fn = reinterpret_cast<PFN_vkWaitForPresentKHR>(dd->gdpa(device, "vkWaitForPresentKHR"));
     return fn ? fn(device, swapchain, presentId, timeout) : VK_SUCCESS;
@@ -2724,7 +2703,7 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_ReleaseSwapchainImagesEXT(
         auto dit = g_devices.find(keyOf(device));
         if (dit != g_devices.end()) dd = dit->second;
     }
-    if (ps) return VK_SUCCESS;
+    if (ps || isOpaqueSwapchainHandle(pInfo->swapchain)) return VK_SUCCESS;
     if (!dd || !dd->gdpa) return VK_SUCCESS;
     auto fn = reinterpret_cast<PFN_vkReleaseSwapchainImagesEXT>(
         dd->gdpa(device, "vkReleaseSwapchainImagesEXT"));
@@ -2736,6 +2715,7 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_ReleaseSwapchainImagesEXT(
 
 // Zink/Mesa resolve these; forwarding an opaque proxy handle into the ICD SIGSEGVs.
 static bool swapchainIsProxy(VkSwapchainKHR swapchain) {
+    if (isOpaqueSwapchainHandle(swapchain)) return true;
     std::lock_guard<std::mutex> lock(g_mu);
     return proxyOf(swapchain) != nullptr;
 }

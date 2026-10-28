@@ -27,10 +27,10 @@ focus_loop() {
     # shellcheck disable=SC2086
     set -- $raw
     while [[ $# -ge 3 ]]; do
-      win="$1"
-      app="$2"
-      shift 3
+      local win="$1"
+      local app="$2"
       local win_dec="$1"
+      shift 3
       [[ "$win" =~ ^0x ]] || win=$(printf '0x%x' "$win_dec" 2>/dev/null || echo "$win")
       # Without -e, gamescope lists appid == window xid. Always try those.
       # If appid is a real Steam id and doesn't match ours, skip.

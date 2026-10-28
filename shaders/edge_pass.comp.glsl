@@ -150,11 +150,11 @@ void tensorEigen(vec3 J, out vec2 alongDir, out float aniso, out float edgeStr) 
     float s = sqrt(disc);
     float l1 = 0.5 * trace + s; // major (across edge)
     float l2 = 0.5 * trace - s; // minor (along edge)
-    // Minor eigenvector: (Jxx-l2, Jxy) × rotate → along edge; use (-Jxy, Jxx-l1) form.
-    vec2 v = vec2(-Jxy, Jxx - l1);
+    // Minor eigenvector: (J - l2*I)*v = 0 => points ALONG the edge.
+    vec2 v = vec2(Jyy - l2, -Jxy);
     float vlen = length(v);
     if (vlen < 1e-8) {
-        v = vec2(-(Jyy - l1), Jxy);
+        v = vec2(-Jxy, Jxx - l2);
         vlen = length(v);
     }
     alongDir = (vlen > 1e-8) ? (v / vlen) : vec2(1.0, 0.0);
@@ -216,8 +216,8 @@ vec3 upsampleFromTile(vec2 uv, vec2 renderSize, ivec2 tileBase, float scale) {
     vec3 a1 = srcBilinear(local - alongDir * stretch);
     vec3 along = 0.5 * (a0 + a1);
     float edgeAmt =
-        clamp(edgeStr * mix(2.0, 4.5, clamp(scale / 2.5, 0.0, 1.0)), 0.0, 1.0) * aniso;
-    return mix(soft, mix(soft, along, 0.45), edgeAmt);
+        clamp(edgeStr * mix(2.5, 6.0, clamp(scale / 2.5, 0.0, 1.0)), 0.0, 1.0) * aniso;
+    return mix(soft, along, edgeAmt * 0.70);
 }
 
 // Perf path: Di Zenzo from texture taps (no shared tensor).
@@ -244,7 +244,7 @@ vec3 upsampleLite(vec2 uv, vec2 renderSize, float scale) {
         0.5 * (sampleSrc(uv + alongDir * texel) + sampleSrc(uv - alongDir * texel));
     float edgeAmt =
         clamp(edgeStr * mix(2.5, 5.5, clamp(scale / 2.5, 0.0, 1.0)), 0.0, 1.0) * aniso;
-    return mix(soft, along, edgeAmt * 0.45);
+    return mix(soft, along, edgeAmt * 0.65);
 }
 
 vec3 upAt(ivec2 p) {
@@ -253,11 +253,10 @@ vec3 upAt(ivec2 p) {
 }
 
 // Display-space CAS using padded shared upscaled tile (real cross-tile neighbors).
-// Anisotropy from opts unused here — scale-aware strength only (fused single store).
 vec3 sharpenPadded(ivec2 upCoord, float sharp, float scale) {
     vec3 base = upAt(upCoord);
     if (sharp <= 0.001) return base;
-    sharp *= mix(1.0, 0.65, clamp((scale - 1.2) / 1.3, 0.0, 1.0));
+    sharp *= mix(1.0, 0.75, clamp((scale - 1.2) / 1.3, 0.0, 1.0));
 
     vec3 cn = upAt(upCoord + ivec2(0, -1));
     vec3 cs = upAt(upCoord + ivec2(0, 1));
@@ -271,26 +270,31 @@ vec3 sharpenPadded(ivec2 upCoord, float sharp, float scale) {
     vec3 mn = min(c, min(min(cn, cs), min(ce, cw)));
     vec3 mx = max(c, max(max(cn, cs), max(ce, cw)));
     vec3 amp = clamp(min(mn, 1.0 - mx) / max(mx - mn, vec3(1e-4)), 0.0, 1.0);
-    float wts = -0.125 - 0.1 * sharp;
+    float wts = mix(-0.04, -0.20, sharp);
     vec3 filt = (cn + cs + ce + cw) * wts + c;
     float inv = 1.0 / (1.0 + 4.0 * wts);
-    return toSrgb(mix(c, filt * inv, amp * sharp));
+    vec3 sharpCol = clamp(filt * inv, mn, mx);
+    return toSrgb(mix(c, sharpCol, amp));
 }
 
 vec3 sharpenLite(vec3 c, vec2 uv, vec2 displaySize, float sharp, float scale) {
     if (sharp <= 0.001) return c;
-    sharp *= mix(1.0, 0.7, clamp((scale - 1.2) / 1.3, 0.0, 1.0));
+    sharp *= mix(1.0, 0.75, clamp((scale - 1.2) / 1.3, 0.0, 1.0));
     vec2 t = 1.0 / displaySize;
-    vec3 n = sampleSrc(uv + vec2(0.0, -t.y));
-    vec3 s = sampleSrc(uv + vec2(0.0, t.y));
-    vec3 e = sampleSrc(uv + vec2(t.x, 0.0));
-    vec3 w = sampleSrc(uv + vec2(-t.x, 0.0));
-    vec3 mn = min(c, min(min(n, s), min(e, w)));
-    vec3 mx = max(c, max(max(n, s), max(e, w)));
+    vec3 cn = sampleSrc(uv + vec2(0.0, -t.y));
+    vec3 cs = sampleSrc(uv + vec2(0.0, t.y));
+    vec3 ce = sampleSrc(uv + vec2(t.x, 0.0));
+    vec3 cw = sampleSrc(uv + vec2(-t.x, 0.0));
+    vec3 cLin = toLin(c);
+    vec3 linN = toLin(cn), linS = toLin(cs), linE = toLin(ce), linW = toLin(cw);
+    vec3 mn = min(cLin, min(min(linN, linS), min(linE, linW)));
+    vec3 mx = max(cLin, max(max(linN, linS), max(linE, linW)));
     vec3 amp = clamp(min(mn, 1.0 - mx) / max(mx - mn, vec3(1e-4)), 0.0, 1.0);
-    float wts = -0.1 - 0.08 * sharp;
-    vec3 filt = (n + s + e + w) * wts + c;
-    return mix(c, filt / (1.0 + 4.0 * wts), amp * sharp);
+    float wts = mix(-0.03, -0.16, sharp);
+    vec3 filt = (linN + linS + linE + linW) * wts + cLin;
+    float inv = 1.0 / (1.0 + 4.0 * wts);
+    vec3 sharpCol = clamp(filt * inv, mn, mx);
+    return toSrgb(mix(cLin, sharpCol, amp));
 }
 
 void main() {

@@ -1120,6 +1120,10 @@ void publishPresentStatus(const char* mode, uint32_t renderW, uint32_t renderH,
     if (displayH) g_rt.lastDisplayH = displayH;
     if (renderW) g_rt.lastRenderW = renderW;
     if (renderH) g_rt.lastRenderH = renderH;
+    if (renderW && displayW && renderW < displayW) {
+        g_rt.scale = static_cast<float>(displayW) / static_cast<float>(renderW);
+        g_rt.presetIdx = presetIndexFromScale(g_rt.scale);
+    }
     if (!g_rt.statusPath[0]) return;
     FILE* f = std::fopen(g_rt.statusPath, "w");
     if (!f) return;
